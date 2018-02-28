@@ -1,0 +1,193 @@
+source("analyze.functions.R")
+library(plyr)
+library(ggplot2)
+library(reshape2)
+library(beeswarm)
+
+media.annotation = read.delim("../data/media_names.tab", sep="\t", na="", quote="", stringsAsFactors=F, header=T)
+media.annotation = media.annotation[order(media.annotation$Order),]
+media.general = media.annotation$ShortName[media.annotation$IsGeneral==1]
+media.rich = media.annotation$ShortName[media.annotation$IsRich==1]
+
+scatter.abundance_correlations = function()
+{
+  organisms.ann = read.delim("../data/organisms.tab", sep="\t", na="", quote="", stringsAsFactors=F, header=T)
+  clusters = read.table("../data/screenG_tax_info_specI_clusters.tab", sep="\t", quote="", header=T, stringsAsFactors=F, na.strings="")
+  organisms.ann = merge(organisms.ann[, c("species", "lineage_species", "phylum", "order", "genus",  "nid")], clusters[,c("NT_code", "SpecI_ID")], by.y="NT_code", by.x="nid", all.x=T)
+  colnames(organisms.ann)[colnames(organisms.ann)=="SpecI_ID"] = "cluster"
+
+  # Taxonimic distance
+  taxonomic_mat = data.matrix(read.table("../data/RefMGv9.speci.tax.dist.2017-03.tsv", sep="\t", quote="", header=T, stringsAsFactors=F, na.strings=""))
+  taxonomic_mat_long = melt(taxonomic_mat)[melt(upper.tri(taxonomic_mat))$value,]
+  names(taxonomic_mat_long) = c("cluster.sp1", "cluster.sp2", "TaxonomicDistance")
+  taxonomic_mat_long[,c("cluster.sp1", "cluster.sp2")] = t(apply(taxonomic_mat_long[,c("cluster.sp1", "cluster.sp2")], 1, sort))
+  taxonomic_mat_long$TaxonomicDistance = factor(taxonomic_mat_long$TaxonomicDistance)
+  taxonomic_levels = c("Species", "Genus", "Family", "Order", "Class", "Phylum", "Kingdom", "Domain")
+  taxonomic_mat_long$TaxonomicDistanceClass = factor(taxonomic_levels[taxonomic_mat_long$TaxonomicDistance], taxonomic_levels)
+  
+  # Phylogenetic distance
+  phylogenetic_mat = data.matrix(read.table("../data/RefMGv9.speci.phylo.dist.2017-03.tsv", sep="\t", quote="", header=T, stringsAsFactors=F, na.strings=""))
+  phylogenetic_mat_long = melt(phylogenetic_mat)[melt(upper.tri(phylogenetic_mat))$value,]
+  names(phylogenetic_mat_long) = c("cluster.sp1", "cluster.sp2", "PhylogeneticDistance")
+  phylogenetic_mat_long[,c("cluster.sp1", "cluster.sp2")] = t(apply(phylogenetic_mat_long[,c("cluster.sp1", "cluster.sp2")], 1, sort))
+  phylogenetic_mat_long = merge(phylogenetic_mat_long, taxonomic_mat_long, by=c("cluster.sp1", "cluster.sp2"))
+  phylogenetic.stats = ddply(phylogenetic_mat_long, .(TaxonomicDistanceClass), summarize, PhylogeneticDistance.median=median(PhylogeneticDistance, na.rm=T), PhylogeneticDistance.mean=mean(PhylogeneticDistance, na.rm=T), PhylogeneticDistance.sd=sd(PhylogeneticDistance, na.rm=T))
+  
+  phylogenetic.stats = data.frame(
+    TaxonomicDistanceClass=c("Species", "Genus", "Family", "Order", "Class", "Phylum", "Kingdom"),
+    PhylogeneticDistance.mode = c(0.18, 0.32, 0.91, 1.1, 2.04, 2.65, 4.15),
+    PhylogeneticDistance.ci_min = c(0.0, 0.0, 0.25, 0.38, 1.4, 1.58, 3.21),
+    PhylogeneticDistance.ci_max = c(0.75, 0.8, 1.7, 1.6, 2.65, 3.45, 5.2)
+  )
+  phylogenetic.stats$TaxonomicDistanceClass = factor(phylogenetic.stats$TaxonomicDistanceClass, levels(phylogenetic_mat_long$TaxonomicDistanceClass))
+  phylogenetic.stats = phylogenetic.stats[order(phylogenetic.stats$TaxonomicDistanceClass),]
+  
+  # Growth matrix  
+  growth_matrix = read.table("../data/supplementary/growth_matrix.tab", sep="\t", quote="", header=T, stringsAsFactors=F, na.strings="", check.names=F)
+  rownames(growth_matrix) = growth_matrix$Species
+  growth_matrix$Species = NULL
+  colnames(growth_matrix) = gsub("^M", "", colnames(growth_matrix))
+  
+  # Calculate growth distance
+  growth_matrix_mat = as.matrix(dist.species(t(growth_matrix)))
+  growth_matrix.dist_long = melt(growth_matrix_mat)[melt(upper.tri(growth_matrix_mat))$value,]
+  names(growth_matrix.dist_long) <- c("species.sp1", "species.sp2", "GrowthDistance")
+  growth_matrix.dist_long[,c("species.sp1", "species.sp2")] = t(apply(growth_matrix.dist_long[,c("species.sp1", "species.sp2")], 1, sort))
+  growth_matrix.dist_long = merge(growth_matrix.dist_long, organisms.ann, by.x="species.sp1", by.y="species")
+  growth_matrix.dist_long = merge(growth_matrix.dist_long, organisms.ann, by.x="species.sp2", by.y="species", suffixes=c(".sp1", ".sp2"))
+  growth_matrix.dist_long_agg = ddply(growth_matrix.dist_long, .(cluster.sp1, cluster.sp2), function(z) { z.ret = z[1,]; z.ret$GrowthDistance = median(z$GrowthDistance); z.ret })
+  
+  growth2abundance = merge(growth_matrix.dist_long_agg, phylogenetic_mat_long, by=c("cluster.sp1", "cluster.sp2"), suffixes=c(".growth", ".phylo"))
+  growth2abundance = merge(growth2abundance, phylogenetic.stats, by="TaxonomicDistanceClass")
+  growth2abundance$TaxonomicDistanceClass = as.character(growth2abundance$TaxonomicDistanceClass)
+  growth2abundance$TaxonomicDistanceClass[growth2abundance$TaxonomicDistanceClass %in% c("Class", "Order")] = "Class"
+  growth2abundance = growth2abundance[,sort(colnames(growth2abundance))]
+  growth2abundance$PhylogeneticOutlier = with(growth2abundance, PhylogeneticDistance> (PhylogeneticDistance.mode + (PhylogeneticDistance.ci_max-PhylogeneticDistance.mode)/1.7))
+  growth2abundance$PhylogeneticOutlierText = ifelse(growth2abundance$PhylogeneticOutlier, "Excluded", "Included")
+  growth2abundance$TaxonomicDistanceClass = factor(growth2abundance$TaxonomicDistanceClass, c("Phylum", "Class","Family", "Genus", "Species"))
+  growth2abundance.f = growth2abundance #subset(growth2abundance, !PhylogeneticOutlier)
+  growth2abundance.cor = ddply(growth2abundance.f, .(TaxonomicDistanceClass), function(z) {
+    if(nrow(z) < 5) return(data.frame(rho=NA, pval=NA))
+    z.cor = cor.test(z$GrowthDistance, z$PhylogeneticDistance, method="spearman")
+    data.frame(rho=z.cor$estimate, pval=z.cor$p.value)
+  })
+  
+  write.table(growth2abundance.cor, file="../data/generated/phylogeny_growth_correlation.tab", sep="\t", quote=F, row.names=F, na="")
+  
+  all.cor = cor.test(growth2abundance.f$GrowthDistance, growth2abundance.f$PhylogeneticDistance, method="spearman")
+  growth2abundance.cor = rbind(growth2abundance.cor, data.frame(TaxonomicDistanceClass="Everything", rho=all.cor$estimate, pval=all.cor$p.value))
+  growth2abundance.cor$TaxonomicDistanceClass = factor(growth2abundance.cor$TaxonomicDistanceClass, unique(growth2abundance.cor$TaxonomicDistanceClass))
+  rownames(growth2abundance.cor) = NULL
+  
+  
+  pdf("../report/phylogeny_growth_correlation.pdf", paper="a4", height=11.69, width=8.27)
+  gridExtra::grid.arrange(
+    ggplot(growth2abundance, aes(GrowthDistance, log10(PhylogeneticDistance))) +
+      geom_point(aes(color=TaxonomicDistanceClass, alpha=ifelse(TaxonomicDistanceClass=="Phylum", 0, 1))) + # shape=PhylogeneticOutlierText, 
+      #geom_smooth(aes(color=TaxonomicDistanceClass), method="lm", data=growth2abundance.f) +
+      geom_smooth(method="lm", data=growth2abundance, color="#666666") +
+      theme_slim() +
+      scale_alpha_continuous(range=c(0.5, 1), guide=F) +
+      scale_color_manual(values=c(Species="#000000", Genus="#333333", Family="#666666", Class="#007FFF", Phylum="#999999", Everything="#666666"))  +
+      #scale_shape_manual(values=c(Included=1, Excluded=4)) +
+      guides(shape=guide_legend(title="Included in correlation"), color=guide_legend(title="Taxonomic level")) +
+      theme(legend.position = c(1, 0), legend.justification = c(1, 0))  
+    ,    
+    ggplot(growth2abundance.cor) +
+      geom_bar(aes(x=TaxonomicDistanceClass, y=rho), stat="identity") +
+      geom_segment(aes(x=as.numeric(TaxonomicDistanceClass)-0.3, xend=as.numeric(TaxonomicDistanceClass)+0.3, y=rho+0.025, yend=rho+0.025), stat="identity", data=subset(growth2abundance.cor, pval < 0.05)) +
+      geom_text(aes(x=TaxonomicDistanceClass, rho+0.05, label=paste0("p. val: ", round(pval, 5))), stat="identity", data=subset(growth2abundance.cor, pval < 0.05)) +
+      geom_hline(yintercept=0) +
+      labs(x="") +
+      theme_slim()
+    ,
+    ncol=1, heights=c(0.6, 0.4)
+  )
+  dev.off()
+}
+
+barplots.taxonomic_rank_growth = function()
+{
+  growth_matrix = read.table("../data/supplementary/growth_matrix.tab", sep="\t", quote="", header=T, stringsAsFactors=F, na.strings="", check.names=F)
+  rownames(growth_matrix) = growth_matrix$Species
+  growth_matrix$Species = NULL
+  colnames(growth_matrix) = gsub("^M", "", colnames(growth_matrix))
+  
+  # Calculate distance
+  growth_matrix_mat = as.matrix(dist.species(t(growth_matrix)))
+  
+  # Distance in long format
+  growth_matrix.dist_long = melt(growth_matrix_mat)[melt(upper.tri(growth_matrix_mat))$value,]
+  names(growth_matrix.dist_long) <- c("species1", "species2", "GrowthDistance")
+  growth_matrix.dist_long[,c("species1", "species2")] = t(apply(growth_matrix.dist_long[,c("species1", "species2")], 1, sort))
+  
+  organisms.ann = read.delim("../data/organisms.tab", sep="\t", na="", quote="", stringsAsFactors=F, header=T)
+
+  growth_matrix.dist_long = merge(growth_matrix.dist_long, organisms.ann, by.x="species1", by.y="species")
+  growth_matrix.dist_long = merge(growth_matrix.dist_long, organisms.ann, by.x="species2", by.y="species", suffixes=c(".sp1", ".sp2"))
+  
+  x = cbind(subset(growth_matrix.dist_long, phylum.sp1==phylum.sp2 & order.sp1!=order.sp2), Rank="Phylum")
+  x = rbind(x, cbind(subset(growth_matrix.dist_long, order.sp1==order.sp2 & genus.sp1!=genus.sp2), Rank="Order"))
+  x = rbind(x, cbind(subset(growth_matrix.dist_long, genus.sp1==genus.sp2 & lineage_species.sp1!=lineage_species.sp2), Rank="Genus"))
+  x = rbind(x, cbind(subset(growth_matrix.dist_long, lineage_species.sp1==lineage_species.sp2), Rank="Species"))
+  growth_matrix.dist_long = x 
+  
+  growth_matrix.dist_long
+  
+  pdf("../report/growth_taxonomic_rank_distances.pdf", paper="a4r", height=8.27, width=11.69)
+  ggplot(growth_matrix.dist_long) +
+    geom_boxplot(aes(Rank, GrowthDistance), fill="#D4D4D4", outlier.color="#00000000") +
+    geom_text(aes(Rank, GrowthDistance, label=n), data=ddply(growth_matrix.dist_long, .(Rank), summarize, GrowthDistance=median(GrowthDistance,na.rm=T), n=length(Rank)), size=8) +
+    geom_jitter(aes(Rank, GrowthDistance), alpha=0.25) +
+    labs(x="Species of the same", y="Growth similarity (euclidean)") +
+    theme_slim()
+  dev.off()
+  
+}
+
+
+curves.cor_phenotypes2phylogeny = function()
+{
+  organisms.ann = read.delim("../data/organisms.tab", sep="\t", na="", quote="", stringsAsFactors=F, header=T)
+  clusters = read.table("../data/screenG_tax_info_specI_clusters.tab", sep="\t", quote="", header=T, stringsAsFactors=F, na.strings="")
+  organisms.ann = merge(organisms.ann[, c("species", "lineage_species", "phylum", "order", "genus",  "nid")], clusters[,c("NT_code", "SpecI_ID")], by.y="NT_code", by.x="nid", all.x=T)
+  colnames(organisms.ann)[colnames(organisms.ann)=="SpecI_ID"] = "cluster"
+  
+  growth_matrix = read.table("../data/supplementary/growth_matrix.tab", sep="\t", quote="", header=T, stringsAsFactors=F, na.strings="")
+  growth_matrix = growth_matrix[,!(colnames(growth_matrix) %in% c("M15A", "M15B", "M16"))]
+  colnames(growth_matrix)[colnames(growth_matrix)=="BHI"] = "BHI++"
+  colnames(growth_matrix) = gsub("^M", "", colnames(growth_matrix))
+  growth_matrix = merge(growth_matrix, subset(organisms.ann, !is.na(cluster), c(species, cluster)), by="species")
+  growth_matrix = ddply(growth_matrix, .(cluster), function(x) { 
+    x = subset(x, , -c(species, cluster))
+    x.0 = colSums(!is.na(x))>0
+    x[x==0] = NA
+    x = colMeans(x, na.rm=T)
+    x[is.na(x) & x.0] = 0
+    x[is.na(x)] = NA
+    x
+  })
+  rownames(growth_matrix) = growth_matrix$cluster
+  growth_matrix$cluster = NULL
+  growth_matrix.dist = dist.species(growth_matrix)
+  
+  # Phylogenetic distance
+  phylogenetic_mat = data.matrix(read.table("../data/RefMGv9.speci.phylo.dist.2017-03.tsv", sep="\t", quote="", header=T, stringsAsFactors=F, na.strings=""))
+  phylogenetic_mat = phylogenetic_mat[rownames(growth_matrix), rownames(growth_matrix)]
+  phylogenetic_dist = as.dist(phylogenetic_mat)
+
+  library(ddply)
+  library(dendextend)
+  growth_matrix_dend = as.dendrogram(hclust(phylogenetic_dist, method="average"))
+  curves.phylo_dend = as.dendrogram(hclust(phylogenetic_dist, method="average"))
+  dendrograms = dendlist(curves.phylo_dend, growth_matrix_dend) %>% untangle("labels")  %>% untangle_DendSer %>% untangle("random", R=100)
+  
+  #
+  # Phylogenetic/Growth tanglegram
+  #
+  #tanglegram.colors = organisms.ann$GENUS[match(labels(dendrograms[[1]]), organisms.ann$species)]
+  #tanglegram.colors[tanglegram.colors %in% c("Salmonella", "Shigella")] = "Escherichia"
+  #tanglegram.colors = factor(tanglegram.colors, names(sort(table(tanglegram.colors), decreasing=T)))
+  #tanglegram.colors = c(RColorBrewer::brewer.pal(5, "Set1"), rep("#999999", 16-5))[tanglegram.colors]
+  tanglegram(dendrograms, margin_inner=12, main_left="Phylogeny", main_right="Growth")
+}

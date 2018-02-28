@@ -1,0 +1,22 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1507212149803.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "0",
+    "id" : "F916E08B",
+    "lastKnownWriteTime" : 1519809805,
+    "last_content_update" : 1519809805,
+    "path" : "X:/Sergej/growth_curves/scripts/analysis.reproducibility.R",
+    "project_path" : "analysis.reproducibility.R",
+    "properties" : {
+        "cursorPosition" : "0,0",
+        "scrollLine" : "0"
+    },
+    "relative_order" : 1,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

@@ -1,0 +1,20 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1507740640815.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "529808569",
+    "id" : "76E7A580",
+    "lastKnownWriteTime" : 1507746700,
+    "last_content_update" : 1507746698322,
+    "path" : "X:/Sergej/growth_curves/scripts/supplementary.generate.R",
+    "project_path" : "supplementary.generate.R",
+    "properties" : {
+    },
+    "relative_order" : 3,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

@@ -1,0 +1,20 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1515762022801.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "151605744",
+    "id" : "C0F128FC",
+    "lastKnownWriteTime" : 1516184749,
+    "last_content_update" : 1516184750777,
+    "path" : "X:/Sergej/gut_bacteria/scripts/analyze.passages.R",
+    "project_path" : "analyze.passages.R",
+    "properties" : {
+    },
+    "relative_order" : 6,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

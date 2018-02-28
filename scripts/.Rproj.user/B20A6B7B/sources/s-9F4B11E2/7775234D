@@ -1,0 +1,22 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1519663180766.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "0",
+    "id" : "7775234D",
+    "lastKnownWriteTime" : 1519668795,
+    "last_content_update" : 1519668794954,
+    "path" : "X:/Sergej/growth_curves/scripts/generate_paper_figures.R",
+    "project_path" : "generate_paper_figures.R",
+    "properties" : {
+        "cursorPosition" : "23,22",
+        "scrollLine" : "0"
+    },
+    "relative_order" : 4,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

@@ -1,0 +1,10 @@
+{
+    "dialog-state" : {
+        "caseSensitive" : false,
+        "filePatterns" : [
+        ],
+        "path" : "X:/Sergej/methods_2/scripts",
+        "query" : "species_selection",
+        "regex" : false
+    }
+}

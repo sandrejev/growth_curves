@@ -1,0 +1,22 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1519668159396.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "0",
+    "id" : "14FDC62F",
+    "lastKnownWriteTime" : 1519668165,
+    "last_content_update" : 1519668164919,
+    "path" : "X:/Sergej/methods_2/scripts/supplementary.generate.R",
+    "project_path" : null,
+    "properties" : {
+        "cursorPosition" : "123,0",
+        "scrollLine" : "0"
+    },
+    "relative_order" : 9,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

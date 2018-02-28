@@ -1,0 +1,22 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1515677801965.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "1839762894",
+    "id" : "987F15D9",
+    "lastKnownWriteTime" : 1515772030,
+    "last_content_update" : 1515772028258,
+    "path" : "X:/Sergej/gut_bacteria/scripts/analysis.overview.R",
+    "project_path" : "analysis.overview.R",
+    "properties" : {
+        "cursorPosition" : "9,5",
+        "scrollLine" : "0"
+    },
+    "relative_order" : 1,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

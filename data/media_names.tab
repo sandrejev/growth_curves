@@ -1,0 +1,21 @@
+ShortName	FullName	FullName2	Order	Filename	IsRich	IsGeneral	Type
+All	All	All	0	M_ALL	0	0	All
+1	1:GMM-	1 dGMM	1	M1_GMM	0	0	Minimal
+2	2:ZP	2 LAB	7	M2_ZP	0	1	Defined
+3	3:GMM&ZP	3 GMM+LAB	8	M3_GMM_ZP	0	1	Defined
+4	4:GMM&ZP (low M&V)	4 GMM+LAB low M/V	9	M4_GMM_ZP_Low_MinerVit	0	1	Defined
+5	5:EXCLUDE SCFA	5 GMM+LAB excluding SCFA	10	M5_GMM_ZP_Exclude_SCFA	0	1	Defined
+7	7:ONLY Monosaccharides	7 GMM+LAB only monosaccharides	11	M7_GMM_ZP_Only_Monosach	0	1	Defined
+8	8:PLUS Mucin	8 GMM+LAB plus Mucin	14	M8_GMM_ZP_Plus_Mucin	0	1	Mucin
+9	9:ONLY Mucin	9 GMM+LAB only Mucin	15	M9_GMM_ZP_Only_Mucin	0	0	Mucin
+10	10:Low AA	10 GMM+LAB 10% amino acids	12	M10_GMM_ZP_Low_AA	0	1	Defined
+11	11:EXCLDUE aromatic AA	11 GMM+LAB excluding aromatic AA	13	M11_GMM_ZP_Exclude_aromaAA	0	1	Defined
+13	13:B. thetaiotaomicron MM	13 B. thetaiotaomicron MM	2	M13_B_Thetaiotaomicron	0	0	Minimal
+14	14:C. perfringens MM	14 C. perfringens MM	3	M14_C_Perfringens	0	0	Minimal
+15 A	15A:E. coli MM1	15A E. coli MM1	4	M15A_E_Coli	0	0	Minimal
+15 B	15B:E. coli MM2	15B E. coli MM2	5	M15B_E_Coli_Limited	0	0	Minimal
+16	16:V. parvula DefM	16 V. parvula defined medium	6	M16_V_Parvula	0	0	Minimal
+GMM	GMM	GMM	16	GMM	1	1	Rich
+BHI++	BHI++	BHI++	17	BHI++	1	1	Rich
+WCA	WCA	WCA	18	WCA	1	1	Rich
+mGAM	mGAM	mGAM	19	mGAM	1	1	Rich

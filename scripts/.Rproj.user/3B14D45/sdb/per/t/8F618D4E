@@ -1,0 +1,22 @@
+{
+    "collab_server" : "",
+    "contents" : "install.packages(c(\"ggplot2\", \"plyr\", \"reshape2\", \"gplots\", \"dplyr\", \"tidyr\", \"readr\", \"beeswarm\", \"XLConnect\", \"RSQLite\", \"VennDiagram\", \"RColorBrewer\", \"pheatmap\", \"gridExtra\"))\n\nsource(\"analysis.media_species_selection.R\")\nunzip(\"../data/kegg.zip\", exdir=\"../data\")\npiechart.media_summary()\npiechart.species_summary()\ncummulative_plot.enzymatic_coverage()\n\nsource(\"analysis.overview.R\")\ntable.growth_matrix()\ntable.replicates_number() # Generate replicates table\nheatmap.obsulute()\nheatmap.relative()\n#heatmap.curves()\nitol.phylogenetic_tree()\nplots.media_preferrence()\n\nsource(\"analysis.abundance.R\")\nboxplots.prevalence_correlation()\n\nsource(\"analyze.pH.R\")\nboxplots_and_scater.pH_overview()\n\nsource(\"analysis.phylogenetic.R\")\nscatter.abundance_correlations()\nbarplots.taxonomi_crank_growth()\n\nsource(\"analysis.mucin.R\")\nplot.mucin_validation_data()\n",
+    "created" : 1515762334400.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "1341626662",
+    "id" : "8F618D4E",
+    "lastKnownWriteTime" : 1515762393,
+    "last_content_update" : 1515762391671,
+    "path" : "X:/Sergej/gut_bacteria/scripts/generate_paper_figures.R",
+    "project_path" : "generate_paper_figures.R",
+    "properties" : {
+        "source_window_id" : "",
+        "tempName" : "Untitled1"
+    },
+    "relative_order" : 7,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

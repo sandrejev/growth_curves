@@ -1,0 +1,22 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1519668130326.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "0",
+    "id" : "CE914402",
+    "lastKnownWriteTime" : 1519668169,
+    "last_content_update" : 1519668169474,
+    "path" : "X:/Sergej/methods_2/scripts/analysis.gapfill.R",
+    "project_path" : null,
+    "properties" : {
+        "cursorPosition" : "332,2",
+        "scrollLine" : "0"
+    },
+    "relative_order" : 6,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

@@ -1,0 +1,22 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1519668725610.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "0",
+    "id" : "27ED44A6",
+    "lastKnownWriteTime" : 1515794251,
+    "last_content_update" : 1515794251,
+    "path" : "X:/Sergej/methods_2/scripts/analysis.phylogenetic.R",
+    "project_path" : null,
+    "properties" : {
+        "cursorPosition" : "144,0",
+        "scrollLine" : "0"
+    },
+    "relative_order" : 10,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

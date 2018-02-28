@@ -1,0 +1,22 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1519668136503.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "0",
+    "id" : "DBC55CAC",
+    "lastKnownWriteTime" : 1519668149,
+    "last_content_update" : 1519668148640,
+    "path" : "X:/Sergej/methods_2/scripts/analysis.curate.R",
+    "project_path" : null,
+    "properties" : {
+        "cursorPosition" : "326,0",
+        "scrollLine" : "319"
+    },
+    "relative_order" : 7,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

@@ -1,0 +1,1794 @@
+library(reshape2)
+library(plyr)
+library(XLConnect)
+library(zoo)
+library(outliers)
+library(NMF)
+library(reshape2)
+library(ggplot2)
+
+is.between <- function(x, ab) {
+    (x - ab[1])  *  (ab[2] - x) > 0
+}
+
+is.between_inc <- function(x, ab) {
+    (x - ab[1])  *  (ab[2] - x) >= 0
+}
+
+
+gen5.load_ftime = function(res.f, path)
+{
+    if(!file.exists(path))
+    {
+        res.f.cols = intersect(colnames(res.f), c("File", "Date", "Batch", "Media", "Species", "ConditionSpecies", "TechnicalReplicates"))
+        res.finish = ddply(res.f, res.f.cols, function(z) {
+            zz <<- z
+            #z = subset(res.f, File=="141029_Growth_Curves_1" & TechnicalReplicates=="G2-H2")
+            z.finished = gen5.curate_outliers(z, type="Finish", excluded=F, forceSingle=T)
+            data.frame(FinishTime = subset(z.finished, Excluded=="Finish")$Time)
+        })
+        save(res.finish, file=path)
+    } else {
+        load(path)
+    }
+    
+    res.finish
+}
+
+
+train.boolean = function(d, d.fit, training.file, fit.cache, question, classes, training.size=NULL)
+{
+    if(file.exists(fit.cache))
+    {
+        load(fit.cache)
+        plot(tr)
+        return(tr)
+    }
+    
+    d.cols = intersect(intersect(colnames(d), colnames(d.fit)), c("File", "Well", "TechnicalReplicates"))
+    
+    if(!file.exists(training.file))
+    {   
+        f1 = apply(d[,d.cols], 1, paste, collapse=" ") %in% apply(d.fit[,d.cols], 1, paste, collapse=" ")
+        d1 = d[is.na(d$ConditionSpecies) | is.na(d$Species) | f1,]
+        
+        res.train = gen5.annotate_boolean(d1, aggregate=T, classes=classes, question=question, size = training.size)
+        write.table(res.train, file=training.file, sep="\t", quote=F, row.names=F)
+    }
+    
+    d.fit.imp = fit.impute(d.fit)
+    
+    res.train = read.delim(training.file, stringsAsFactors=F)    
+    d.cols = intersect(d.cols, colnames(res.train))
+    
+    library(caret)
+    res.train = merge(res.train, unique(d[,d.cols]), by=d.cols)
+    res.train$cl = factor(res.train$cl, classes) 
+    #res.train.gr = subset(res.train, cl == classes[1])
+    #res.train.nogr = subset(res.train, cl == classes[2])
+    #res.train.gr = res.train.gr[sample(1:nrow(res.train.gr), nrow(res.train.nogr)),]
+    #res.train = rbind(res.train.nogr, res.train.gr)
+    
+    res.train = merge(d.fit.imp, res.train, by=c(d.cols, "Species", "ConditionSpecies"))
+    res.train.bck = res.train 
+    res.train.cols = intersect(colnames(res.train), c("auc", "mu.blank", "max.blank", "max.time", "mu.finish", "mu.finish.rel", "cl"))
+    res.train = res.train[,res.train.cols]
+    
+    x=subset(res.train, , -cl)
+    y=res.train$cl
+    tr = caret::train(x, y, method="ada", tuneLength=3, trControl=trainControl(method="cv", verboseIter=T))
+    res.train.bck$cl.pred = predict(tr, res.train.bck)
+    
+    res.train.hm = matrix(table(res.train.bck$cl, res.train.bck$cl.pred), ncol=2)
+    colnames(res.train.hm) = rownames(res.train.hm) = classes
+    
+    par(mfrow=c(2,1))
+    aheatmap(res.train.hm, labels=apply(res.train.hm, 1:2, as.character), labels_gp = gpar(fontsize=8, col="#666666"),
+             cellwidth=20, cellheight=20, breaks=0,
+             cexRow=2, cexCol=1.5, Rowv=NA, Colv=NA)
+    
+    varplot(tr$finalModel)
+    par(mfrow=c(1,1))
+    
+    plot(tr)
+    
+    save(tr, file=fit.cache)
+    
+    #View(subset(res.train.bck, cl != cl.pred, c(File, TechnicalReplicates, ConditionSpecies, cl, cl.pred)))
+    gen5.plotplate(subset(res.curated, File=="ZP_2_C_ramosum"), merge.techrep=T)
+    
+    return(tr)
+}
+
+
+gen5.prune_name = function(z)
+{
+    z[is.na(z)] = paste0("unnamed_", 1:sum(is.na(z)))
+    z = gsub(" +", "_", iconv(z, "latin1", "ASCII", sub=" "))
+    z
+}
+
+gen5.repeat_label = function(z)
+{
+    prev.z = NA
+    for(j in 1:length(z)) {
+        if(is.na(z[j])) {
+            z[j] = prev.z
+        }   
+        
+        prev.z = z[j]
+    }
+    
+    z
+}
+
+
+gen5.add_class = function(x, val) {
+    prev = ifelse(is.na(x), "", x)
+    sep = ifelse(is.na(x) | substring(x, nchar(x)) == ";", "", ";")
+    ifelse(!grepl(val, x), paste0(prev, sep, val), x)
+}
+
+gen5.remove_class = function(x, val) {
+    ret = x
+    for(v in val)
+    {
+        ret = gsub(paste0(v, ";?"), "", ret)
+        ret = ifelse(is.na(ret) | ret=="", NA, ret)
+    }
+    
+    gsub(";$", "", ret)
+}
+
+
+gen5.align_curves = function(data)
+{
+    median.well.corrections <<- c()
+    
+    species.fcount = ddply(subset(data, !is.na(Species)), .(Species), function(z) {
+        data.frame(
+            n=length(unique(z$File)), 
+            File=unique(z$File), 
+            FileGroupCode=paste(unique(z$File), collapse=" "))
+    })
+    
+    species.fcount = subset(species.fcount, !is.na(Species))
+    data = merge(data, species.fcount[,c("File", "FileGroupCode")], by="File")
+    
+    window = 3
+    data.out = ddply(data, .(FileGroupCode), function(z) {
+        z.base = subset(z, is.na(Species) & (is.na(Excluded) | grepl("Rejected", Excluded)))
+        z.base$z.base.wells = length(unique(z.base$Well))
+        z.base.sum = ddply(z.base, .(Time), summarize, median=median(OD, na.rm=T), sd=sd(OD, na.rm=T), count=length(OD)/z.base.wells[1])
+        
+        z = ddply(z, .(File, Well), function(z1) {
+            z2 = z1[order(z1$Time),]
+            z2 = subset(z2, is.na(Excluded) | grepl("Rejected", Excluded))
+            z2 = merge(z2[1:3,c("Time", "OD")], z.base.sum)
+            
+            if(!nrow(z2)) 
+                return(z1)
+            
+            z2 = z2[order(abs(z2$median - z2$OD)),]
+            z.correction = z2$median[1] - z2$OD[1]
+            z1$OD = z1$OD + z.correction
+            
+            median.well.corrections <<- c(median.well.corrections, z.correction)
+            
+            z1
+        })
+        
+        z
+    })
+    
+    data.out$FileGroupCode = NULL
+    
+    hist(median.well.corrections)
+    
+    data.out
+}
+
+gen5.mark_reperrors = function(d)
+{
+    d.sum = ddply(d, .(File, Media, ConditionSpecies, Species), function(z) {
+        is_growing = table(z$growth)
+        is_valid = max(is_growing) == sum(is_growing)
+        z$growth=names(is_growing)[which.max(is_growing)]
+        
+        z$exclude = NA
+        if(!is_valid) 
+            z$exclude = gen5.add_class(z$exclude, "TechRep")
+        
+        z
+    })
+    
+    d.sum = ddply(d.sum, .(Media, ConditionSpecies, Species), function(z) {
+        is_valid = max(table(z$growth)) == length(z$growth)
+        if(!is_valid)
+            z$exclude = gen5.add_class(z$exclude, "BioRep")
+        
+        z
+    })
+
+    d.sum
+}
+
+gen5.summarize_replicates = function(d)
+{
+    d.sum = ddply(d, .(File, Media, Annotation, ConditionSpecies, Species), function(z) {
+        is_growing = table(z$growth)
+        is_valid = max(is_growing) > sum(is_growing)/2
+        cl = names(is_growing)[which.max(is_growing)]
+        cl.f = z$growth == cl
+
+        ret = data.frame(lag=ifelse(is_valid, mean(z$lag[cl.f], na.rm=T), NA))
+        ret$reproducibility = mean(cl.f)
+        
+        
+        if(!is.null(z$max))      ret$max=ifelse(is_valid, mean(z$max[cl.f], na.rm=T), NA)
+        if(!is.null(z$max.blank)) ret$max.blank=ifelse(is_valid, mean(z$max.blank[cl.f], na.rm=T), NA)
+        if(!is.null(z$max.rel)) ret$max.rel=ifelse(is_valid, mean(z$max.rel[cl.f], na.rm=T), NA)
+        if(!is.null(z$mu))       ret$mu=ifelse(is_valid, mean(z$mu[cl.f], na.rm=T), NA)
+        if(!is.null(z$mu.blank)) ret$mu.blank=ifelse(is_valid, mean(z$mu.blank[cl.f], na.rm=T), NA)
+        if(!is.null(z$mu.rel)) ret$mu.rel=ifelse(is_valid, mean(z$mu.rel[cl.f], na.rm=T), NA)
+        
+        ret$growth=names(is_growing)[which.max(is_growing)]
+        if(!is.null(z$finished)) ret$finished=mean(z$finished[cl.f], na.rm=T)
+        
+        if(any(!is.na(z$Excluded))) ret$exclude = na.omit(z$Excluded)[1]
+        else ret$exclude = NA
+        ret$exclude[!is_valid] = gen5.add_class(ret$exclude[!is_valid], "TechRep")
+
+        
+        ret
+    })
+    
+    ###
+    #d.sum = ddply(d.sum, .(Media, ConditionSpecies, Species), function(z) {
+    #    is_growing = table(z$growth)
+    #    is_valid = max(is_growing) > sum(is_growing)/2
+    #    z$exclude[!is_valid & !is.na(z$Species)] = gen5.add_class(z$exclude[!is_valid & !is.na(z$Species)], "BioRep")
+    #z
+    #)#
+    
+    a = merge(d.sum, subset(d.sum, is.na(ConditionSpecies)), by=c("File", "Species"), suffixes=c("", ".mono"))
+    #with(subset(a, is.na(ConditionSpecies)), plot(max, max.mono))
+    
+    a$.valid = is.na(a$exclude) & is.na(a$exclude.mono) & !is.na(a$growth) & 
+        !is.na(a$growth.mono) & !is.na(a$ConditionSpecies) & 
+        grepl("^growth$", a$growth) & grepl("^growth$", a$growth.mono)
+    
+    a = ddply(a, .(Media, ConditionSpecies, Species), mutate, 
+        mu.blank.diff=ifelse(.valid, mu.blank-mu.blank.mono, NA),
+        max.blank.diff=ifelse(.valid, max.blank-max.blank.mono, NA), 
+        mu.blank.lfold=ifelse(.valid, log2(mu.blank/mu.blank.mono), NA), 
+        max.blank.lfold=ifelse(.valid, log2(max.blank/max.blank.mono), NA), 
+        mu.diff=ifelse(.valid, mu-mu.mono, NA),
+        max.diff=ifelse(.valid, max-max.mono, NA), 
+        mu.lfold=ifelse(.valid, log2(mu/mu.mono), NA), 
+        max.lfold=ifelse(.valid, log2(max/max.mono), NA)
+    )
+    
+    a$.valid = NULL
+    
+    a
+}
+
+gen5.calc_techreps = function(res)
+{
+    ddply(res, .(File, ConditionSpecies, Species), function(z) {
+        wells = unique(z$Well[order(as.character(z$Row), as.numeric(as.character(z$Col)))])
+        if(length(wells) > 1) {
+            z$TechnicalReplicates = paste0(wells[1], "-", wells[length(wells)])
+        } else {
+            z$TechnicalReplicates = wells
+        }
+        
+        z
+    })
+}
+
+
+fit.impute = function(fit)
+{
+    fit$.order = 1:nrow(fit)
+    fit.bck = fit
+    fit$Solvent = solvent(fit$ConditionSpecies)
+    fit.ref = subset(fit, is.na(ConditionSpecies) | solvent(ConditionSpecies,1) == solvent(ConditionSpecies,2))
+    fit.ref = ddply(fit.ref, .(File, Solvent), summarize, max.blank.ref=mean(max.blank, na.rm=T), mu.blank.ref=mean(mu.blank, na.rm=T))
+    files = setdiff(fit$File, fit.ref$File)
+    if(length(files) > 0) stop(paste("There is no reference value for these files:", files, collapse=","))
+    
+    fit = merge(fit.ref, fit, by=c("File", "Solvent"))
+    stopifnot(nrow(fit.bck) == nrow(fit))
+        
+    if(!is.null(fit$mu)) fit$mu[is.na(fit$mu)] = 0
+    if(!is.null(fit$mu.blank)) fit$mu.blank[is.na(fit$mu.blank)] = 0
+    if(!is.null(fit$lag)) fit$lag[is.na(fit$lag)] = max(fit$lag, na.rm=T) + 1
+    if(!is.null(fit$max)) fit$max[is.na(fit$max)] = fit$base[is.na(fit$max)]
+    if(!is.null(fit$max.blank)) fit$max.blank[is.na(fit$max.blank)] = fit$base[is.na(fit$max.blank)]
+    if(!is.null(fit$max.time)) fit$max.time[is.na(fit$max.time)] = 1
+    if(!is.null(fit$mu.finish)) fit$mu.finish[is.na(fit$mu.finish)] = fit$mu[is.na(fit$mu.finish)]
+    if(!is.null(fit$auc)) fit$auc[is.na(fit$auc) | fit$auc < 0] = 0
+    
+    fit = ddply(fit, .(File), mutate, 
+                max.rel=abs(max.blank-max.blank.ref)/max.blank.ref, 
+                mu.rel=abs(mu.blank-mu.blank.ref)/mu.blank.ref,
+                mu.finish.rel = mu.finish/mu.blank
+    )
+    
+    fit = fit[order(fit$.order),]
+    fit$.order = NULL
+    
+    fit
+}
+
+gen5.annotate_coordinates = function(d, aggregate=F, start=1, mu=F, assist=NULL, other=NULL)
+{
+    annotations = data.frame()
+    
+    d.cols = c("File", "Media", "ConditionSpecies", "Species", ifelse(aggregate, "TechnicalReplicates", "Well"))
+    
+    wells = unique(d[,d.cols])
+    size = round(nrow(wells))
+    writeLines(paste("using size:", size))
+    
+    if(nrow(wells) > size) {
+        wells.s = sample(1:nrow(wells), size)
+    } else {
+        wells.s = 1:nrow(wells)
+    }
+    
+    w = wells.s[start]
+    while(which(w == wells.s) <= length(wells.s)) {        
+        d.f = d$File==wells$File[w]
+        if(aggregate) { 
+            d.f = d.f & d$TechnicalReplicates==wells$TechnicalReplicates[w] 
+        } else { 
+            d.f = d.f & d$Well==wells$Well[w] 
+        }
+        
+        
+        dw = d[d.f,]
+        dw.cols = unique(dw[,c("File", "Well")])
+        dw.cols$Color = RColorBrewer::brewer.pal(9, "Set1")[1:nrow(dw.cols)]
+        dw.plot = merge(dw, dw.cols, by=c("File", "Well"))
+        
+        d.nf = d$File != dw$File[1] & paste(d$Species, d$ConditionSpecies, d$Media) == paste(dw$Species, dw$ConditionSpecies, dw$Media)[1]
+        hi_od = max(dw.plot$OD, na.rm=T)
+        lo_od = min(dw.plot$OD, na.rm=T)
+        if(length(d.nf) && any(d.nf)) {
+          hi_od2 = max(d[d.nf, "OD"], na.rm=T)
+          if(!is.na(hi_od2)) hi_od = max(hi_od, hi_od2, na.rm=T)
+          lo_od2 = min(d[d.nf, "OD"], na.rm=T)
+          if(!is.na(lo_od2)) lo_od = max(lo_od, lo_od2, na.rm=T)
+        }
+        
+        plot(dw.plot$Time/3600, dw.plot$OD, main=gsub("^[^:]+: (.*)$", "\\1", gen5.wells_name(dw[1,])), ylim=c(0, hi_od))
+        
+        
+        if(!is.null(assist))
+        {
+          col.od = colnames(assist)[grepl("^(OD|Mu)\\.", colnames(assist)) | grepl("^(OD|Mu)$", colnames(assist))]
+          col.time = colnames(assist)[grepl("^(Time|ODIntercept)", colnames(assist))]
+          
+          if(length(grep("\\.", col.od))) {
+            col = data.frame(
+              var=c(gsub("(.*)\\.(.*)", "\\1", col.od), gsub("(.*)\\.(.*)", "\\1", col.time)),
+              src=c(gsub("(.*)\\.(.*)", "\\2", col.od), gsub("(.*)\\.(.*)", "\\2", col.time)))
+            col = aggregate(paste0(col$var, ".", col$src), by=list(src=col$src), FUN=function(z) z)
+          } else {
+            col = data.frame(src="Annotation", columns=c(col.od[1], col.time[1]))
+            col = aggregate(as.character(col$columns), by=list(src=col$src), FUN=function(z) z)
+          }
+          col$Color = RColorBrewer::brewer.pal(8, "Dark2")[1:nrow(col)]
+          
+          dw.legend = c(paste0(dw$File[1], ": ", dw$TechnicalReplicates[1]), as.character(col$src))
+          dw.col = c("#00000000", col$Color)
+        } else {
+          dw.legend = paste0(dw$File[1], ": ", dw$TechnicalReplicates[1])
+          dw.col = "#00000000"
+        }
+        
+        legend("topleft", dw.legend, col=dw.col, lty=2)
+        legend("bottomright", "LEFT (back)    |    BOTTOM (repeat)")
+        
+        ddply(dw.plot, .(File, Well), function(ddw) { 
+          ddw = ddw[order(ddw$Time),]
+          lines(ddw$Time/3600, ddw$OD, lty=2, lwd=2, col=ddw$Color) 
+        })
+        
+        if(!is.null(assist)) {
+            assist.f = assist$File==wells$File[w]
+            if(aggregate) { 
+                assist.f = which(assist.f & assist$TechnicalReplicates==wells$TechnicalReplicates[w]) 
+            } else { 
+                assist.f = which(assist.f & assist$Well==wells$Well[w])
+            }
+            
+            for(x.i in 1:nrow(col)) {
+              x.src = as.character(col[x.i,1])
+              x.od = as.vector(col[x.i,2])[grepl("^(OD|Mu)\\.", as.vector(col[x.i,2])) | grepl("^(OD|Mu)$", as.vector(col[x.i,2]))]
+              x.time = as.vector(col[x.i,2])[grepl("^(Time|ODIntercept)", as.vector(col[x.i,2]))]
+              x.col = col$Color[x.i]
+              
+              if(any(assist$Type == "abline")) {
+                if(grepl("Mu", x.od)) {
+                  abline(a=assist[[x.time]][assist.f], b=assist[[x.od]][assist.f], col=x.col)
+                }
+                if(grepl("OD", x.od)) {
+                  abline(v=assist[[x.od]][assist.f], col=x.col)
+                }
+              } else {
+                if(grepl("Mu", x.od)) {
+                  abline(a=assist[[x.time]][assist.f], b=assist[[x.od]][assist.f], col=x.col)
+                }
+                if(grepl("OD", x.od)) {
+                  points(assist[[x.time]][assist.f]/3600, assist[[x.od]][assist.f], col=x.col, pch=21, lwd=8, bg="#FFFFFF")
+                }
+              }
+            }
+        }    
+        
+        
+        if(nrow(dw.cols) > 1) {
+            dw.approx = approx(dw.plot$Time/3600, dw.plot$OD)
+            lines(dw.approx$x, dw.approx$y, lwd=6, col="#33333366")
+        }
+        
+        if(!is.null(other))
+        {
+          d.other = subset(other, Species==dw[1,"Species"] & Media==dw[1,"Media"] & ((is.na(dw[1,"ConditionSpecies"]) & is.na(ConditionSpecies)) | dw[1,"ConditionSpecies"]==ConditionSpecies))
+          ddply(d.other, .(File, TechnicalReplicates), function(ddw) { 
+            ddw = ddw[order(ddw$Time),]
+            ddw.approx = approx(ddw$Time/3600, ddw$OD)
+            lines(ddw.approx$x, ddw.approx$y, lwd=6, col="#22222211")
+          })
+        }
+        
+        
+        ddply(d[d.nf,], .(File, TechnicalReplicates), function(ddw) { 
+            ddw = ddw[order(ddw$Time),]
+            
+            ddw.cols = unique(ddw[,c("File", "Well")])
+            ddw.cols$Color = paste0(RColorBrewer::brewer.pal(9, "Set1")[1:nrow(ddw.cols)], 22)
+            ddw.plot = merge(ddw, ddw.cols, by=c("File", "Well"))
+            ddply(ddw.plot, .(File, Well), function(dddw) { 
+                dddw = dddw[order(dddw$Time),]
+                lines(dddw$Time/3600, dddw$OD, lty=2, lwd=2, col=dddw$Color) 
+            })
+            
+            ddw.approx = approx(ddw$Time/3600, ddw$OD)
+            lines(ddw.approx$x, ddw.approx$y, lwd=6, col="#22229922")
+        })            
+        
+        annotation = graphics::locator(n=ifelse(mu, 2, 1))
+        if(is.null(annotation)) break
+        
+        # GO BACK
+        if(any(annotation$x < 0)) {
+            if(which(w == wells.s) - 2 < start) { w = wells.s[start] } 
+            else { w = wells.s[which(w == wells.s) - 2] }
+
+            writeLines(paste0(which(w == wells.s), "/", length(wells.s), ": go back"))
+            next
+        }
+        
+        # REPEAT
+        if((!any(d.nf) | any(annotation$y < suppressWarnings(min(d[d.nf,"OD"], na.rm=T)))) & any(annotation$y < min(dw[,"OD"], na.rm=T) - 0.05)) {
+            if(which(w == wells.s) - 1 < start) { w = wells.s[start] } 
+            else { w = wells.s[which(w == wells.s) - 1] }
+            
+            writeLines(paste0(which(w == wells.s), "/", length(wells.s), ": repeat"))
+            
+            next
+        }
+        
+        ann = wells[w,]
+        rownames(ann) = paste(as.character(wells[w,]), collapse=" ")
+        
+        if(!mu) {
+            ann$OD = round(annotation$y, 3)
+            ann$Time = round(annotation$x*3600)
+        } else {
+            s1 = which.min(annotation$x); s2 = which.max(annotation$x)
+            ann$Mu = (annotation$y[s2] - annotation$y[s1])/(annotation$x[s2] - annotation$x[s1])
+            ann$ODIntercept = annotation$y[s1] - annotation$x[s1]*ann$Mu
+            abline(a=ann$ODIntercept, b=ann$Mu, col="black")
+        }
+        if(rownames(ann) %in% rownames(annotations)) { annotations[rownames(ann),] = ann 
+        } else { annotations = rbind(annotations, ann) }
+        
+        if(!mu) {
+        writeLines(paste0(which(w == wells.s), "/", length(wells.s), ": OD=", ann['OD'], " Time=", ann['Time']))
+        } else {
+            writeLines(paste0(which(w == wells.s), "/", length(wells.s), ": Mu=", ann['Mu'], " ODIntercept=", ann['ODIntercept']))
+        }
+    
+        if(which(w == wells.s) == length(wells.s)) break
+        w = wells.s[which(w == wells.s)+1]
+    }
+    
+    
+    annotations
+}
+
+gen5.annotate_boolean = function(d, aggregate=F, size=NULL, classes=c(y="growth", n="no growth"), question="Does it grow", show.options=T, start=1)
+{
+    #d.models = gen5.condition_models(d)
+    #d.bases = gen5.find_base(d)
+    
+    annotations = data.frame()
+    
+    d = subset(d, !is.na(Species) & Species != "Standard")
+    d.cols = c("File", "ConditionSpecies", "Species", ifelse(aggregate, "TechnicalReplicates", "Well"))
+    
+    wells = unique(d[,d.cols])
+    if(is.null(size)) {
+        size = round(nrow(wells)*0.05)
+    }
+    writeLines(paste("using size:", size))
+    
+    if(nrow(wells) > size) {
+        wells.s = sample(1:nrow(wells), size)
+    } else {
+        wells.s = 1:nrow(wells)
+    }
+    
+    
+    for(w in wells.s[start:length(wells.s)]) {
+        rep = T
+        br = F
+        while(rep)
+        {
+            d.f = d$File==wells$File[w]
+            if(aggregate) { 
+                d.f = d.f & d$TechnicalReplicates==wells$TechnicalReplicates[w]
+            } else { 
+                d.f = d.f & d$Well==wells$Well[w] 
+            }
+            
+            dw = d[d.f,]
+            dw.cols = unique(dw[,c("File", "Well")])
+            dw.cols$Color = RColorBrewer::brewer.pal(9, "Set1")[1:nrow(dw.cols)]
+            dw.plot = merge(dw, dw.cols, by=c("File", "Well"))
+            plot(dw.plot$Time/3600, dw.plot$OD, main=paste(dw[1,"File"], gsub("^[^:]+: (.*)$", "\\1", gen5.wells_name(dw[1,]))))
+            
+            dw.legend = paste0(dw$File[1], ": ", dw$TechnicalReplicates[1])
+            dw.cl_cols = colnames(dw)[grep("^cl", colnames(dw))]
+            if(length(dw.cl_cols)) {
+                dw.legend = c(paste0(dw.cl_cols, ": ", dw[1, dw.cl_cols]))
+            }
+            legend("topleft", dw.legend)
+            
+            
+            ddply(dw.plot, .(File, Well), function(ddw) { 
+                ddw = ddw[order(ddw$Time),]
+                lines(ddw$Time/3600, ddw$OD, lty=2, lwd=2, col=ddw$Color) 
+            })
+            
+            
+            if(nrow(dw.cols) > 1) {
+                dw.approx = approx(dw.plot$Time/3600, dw.plot$OD)
+                lines(dw.approx$x, dw.approx$y, lwd=6, col="#33333366")
+            }
+            
+            d.nf = d$File != dw$File[1] & paste(d$Species, d$ConditionSpecies, d$Media) == paste(dw$Species, dw$ConditionSpecies, dw$Media)[1]
+            ddply(d[d.nf,], .(File, TechnicalReplicates), function(ddw) { 
+                ddw = ddw[order(ddw$Time),]
+                
+                ddw.cols = unique(ddw[,c("File", "Well")])
+                ddw.cols$Color = paste0(RColorBrewer::brewer.pal(9, "Set1")[1:nrow(ddw.cols)], 22)
+                ddw.plot = merge(ddw, ddw.cols, by=c("File", "Well"))
+                ddply(ddw.plot, .(File, Well), function(dddw) { 
+                    dddw = dddw[order(dddw$Time),]
+                    lines(dddw$Time/3600, dddw$OD, lty=2, lwd=2, col=dddw$Color) 
+                })
+                
+                dw.approx = approx(ddw$Time/3600, ddw$OD)
+                lines(dw.approx$x, dw.approx$y, lwd=6, col="#22229922")
+            })            
+            
+            
+            question.options = paste0("(", paste(names(classes), collapse=", ") ,", break)? ")
+            line = readline(prompt=paste0(which(w == wells.s), ": ", question, "? ", ifelse(show.options, question.options, "")))
+            if(line == "break") {
+                br = T
+                break
+            }
+            
+            ann = wells[w,]
+            
+            if(line %in% names(classes)) {
+                ann$cl = classes[line]
+                annotations = rbind(annotations, ann)
+                rep = F
+            } else {
+                rep = T
+            }
+        }
+        
+        if(br) break
+    }
+    
+    annotations
+}
+
+gen5.find_base = function(data)
+{
+    ddply(data, .(File), function(z) {
+        z.base = subset(z, is.na(Species) & (is.na(Excluded) | grepl("Rejected", Excluded)))
+        z.base$z.base.wells = length(unique(z.base$Well))
+        z.base.sum = ddply(z.base, .(Time), summarize, min=median(OD, na.rm=T), median=median(OD, na.rm=T), sd=sd(OD, na.rm=T), count=length(OD)/unique(z.base.wells))
+        z.base.sum = z.base.sum[order(z.base.sum$Time),]
+        
+        base = with(z.base.sum[1:3,], min[count > 0.5])        
+        data.frame(base=ifelse(length(base), min(base, na.rm=T), NA))
+    })
+}
+
+solvent = function(cond.org, n=2) {
+    cg = "^([^|]+)\\|([^|]+)$"
+    ifelse(grepl("\\|", cond.org) | n == 1, gsub(cg, paste0("\\", n), cond.org), NA)
+}
+
+
+gen5.plotplate = function(data, merge.techrep=F, merge=F, main=NA, show.drops=T, show.annotation=T)
+{
+    data$Time = data$Time / 3600
+    data$RepCol = factor(gsub("[ABCDEFGH]", "", data$TechnicalReplicates))
+    repcol.lvl = levels(data$RepCol)[order(as.numeric(gsub("^([^-]+).*", "\\1", levels(data$RepCol))))]
+    data$RepCol = factor(data$RepCol, repcol.lvl)
+
+    data$RepRow = factor(gsub("[0-9]+", "", data$TechnicalReplicates))
+    reprow.lvl = levels(data$RepRow)[order(gsub("^([^-]+).*", "\\1", levels(data$RepRow)))]
+    data$RepRow = factor(data$RepRow, reprow.lvl)
+    
+    rdim = ifelse(all(sapply(strsplit(repcol.lvl, "-"), function(x) x[1]==x[2])), 1, 2)
+    rdim.col = ifelse(rdim==1, "RepRow", "RepCol")
+    
+    p = NULL
+    if(!merge)
+    {
+        data$Col = factor(data$Col, sort(unique(as.numeric(as.character(data$Col)))))
+        data$Row = factor(data$Row, sort(unique(data$Row)))
+        data$Control = ifelse(is.na(data$Species), "Control", "Measurement")
+        control.f = with(data, !is.na(Species) & (is.na(ConditionSpecies) | (!is.na(solvent(ConditionSpecies, 2)) & solvent(ConditionSpecies, 1) == solvent(ConditionSpecies, 2))))
+        data$Control[control.f & !is.na(data$ConditionSpecies)] = solvent(data$ConditionSpecies[control.f & !is.na(data$ConditionSpecies)])
+        data.f = subset(data, is.na(Excluded) | grepl("Rejected", Excluded))
+        data.f$Solvent = solvent(data.f$ConditionSpecies)        
+        
+        data.f.cont.cols = c("Row", "Col")
+        if(merge.techrep) data.f.cont.cols = c("Row", rdim.col)
+        if(show.annotation) {
+          data.f.sum = ddply(data.f, c("Col", "Row", rdim.col), summarize, Type=Control[1], Max=max(OD, na.rm=T), 
+            Title=paste0(Annotation[1], ifelse(!is.na(ConditionSpecies[1]), paste(":", ConditionSpecies[1]), "")))
+        } else {
+          data.f.sum = ddply(data.f, c("Col", "Row", rdim.col), summarize, Type=Control[1], Max=max(OD, na.rm=T), 
+                             Title=ifelse(!is.na(ConditionSpecies[1]), ConditionSpecies[1], ""))
+        }
+        data.f.sum = data.f.sum[!duplicated(data.f.sum[,c("Type", "Title")]),]
+        
+        data.f.sum$RowM = data.f.sum$Row
+        data.f.solvent = subset(data.f.sum, Type=="Measurement")
+        data.f.cont = subset(data.f.sum, Type!="Measurement")
+        
+        data.f.ref = subset(data.f, !is.na(Species) & (is.na(ConditionSpecies) | (!is.na(solvent(ConditionSpecies, 2)) & solvent(ConditionSpecies, 1) == solvent(ConditionSpecies, 2))), c(Row, Col, Well, Media, File, Species, Solvent, Time, OD))
+        colnames(data.f.ref)[1:3] = c("RefRow", "RefCol", "RefWell")
+        data.f.ref$Control = rep("Reference", nrow(data.f.ref))
+        data.f.exp = unique(data.f[!is.na(data.f$ConditionSpecies) & (is.na(solvent(data.f$ConditionSpecies, 2)) | solvent(data.f$ConditionSpecies, 1) != solvent(data.f$ConditionSpecies, 2)), c("Media", "File", "Solvent", "Species", "Row", "Col", "TechnicalReplicates", rdim.col)])
+        data.f.ref = merge(data.f.exp, data.f.ref, by=c("Media", "File", "Species", "Solvent"), all.x=T)
+        
+        data.f$RowM = data.f$Row = factor(data.f$Row, sort(unique(data.f$Row)))
+        data.f$ColTech = 1 + as.numeric(as.character(data.f$Col)) - as.numeric(gsub("^[^0-9]+(\\d+)-?.*$", "\\1", data.f$TechnicalReplicates))
+        
+        p = ggplot(data.f)
+        if(nrow(data.f.ref))
+            p = p + geom_line(aes(x=Time, y=OD, group=paste(File, RefWell)), data=data.f.ref, alpha=0.2)
+        p = p + geom_line(aes(Time, OD, color=factor(paste(File, ColTech)), group=paste(File, Well)), alpha=ifelse(merge.techrep, 0.5, 1)) 
+        if(nrow(data.f.cont) > 0)
+            p = p + geom_rect(aes(fill=Type), xmin=-Inf, xmax=Inf, ymin=-Inf, ymax=Inf, alpha=0.25, data=data.f.cont)
+        
+        if(nrow(data.f.solvent) > 0) 
+            p = p + geom_text(aes(x=0, y=Max, label=Title), hjust=0, size=3, data=data.f.solvent)
+        
+        p = p + theme_classic()
+            
+        fplt = c("#1F78B4", "#8BBCD9", "#D1E1EA", "#F5C28F", "#F96A05", "#E31A1C")
+        if(!is.null(data.f$max_interaction_type_adj))
+        {
+            data.f_int = ddply(data.f, data.f.cont.cols, summarize, max_interaction_type_adj=max_interaction_type_adj[1])
+            data.f_int = subset(data.f_int, !is.na(max_interaction_type_adj) & max_interaction_type_adj != "none")
+            if(nrow(data.f_int) > 0)
+                p = p + geom_rect(aes(fill=max_interaction_type_adj), xmin=-Inf, xmax=Inf, ymin=-Inf, ymax=Inf, alpha=0.25, data=data.f_int) 
+        }
+    
+        rep.count = length(unique(paste(data.f$File, data.f$ColTech)))+1
+        getPalette = colorRampPalette(c("#323348", "#2357BA", "#619BB1"))
+        p = p + scale_color_manual(values=getPalette(rep.count), name="Well")
+        p = p + scale_fill_manual(
+            values=c(
+                    "Control"="#EAFDE6",
+                    "H2O"="#519548",
+                    "DMSO"="#88C425",
+                    "lethal"=fplt[1],
+                    "strong negative"=fplt[2],
+                    "weak negative"=fplt[3],
+                    "weak positive"=fplt[4],
+                    "strong positive"=fplt[5],
+                    "resque"=fplt[6]))
+        
+        if(merge.techrep) 
+            if(rdim == 1) {
+                p = p + facet_grid(RepRow ~ Col)
+            } else {
+                p = p + facet_grid(RowM ~ RepCol)
+            }
+        else 
+            p = p + facet_grid(Row ~ Col) 
+    
+        data.drops = ddply(data, .(Time), function(z) { data.frame(Drops = mean(!is.na(z$Excluded) & !grepl("Rejected", z$Excluded), na.rm=T)) })
+        data.drops = subset(data.drops, Drops > 0)
+        if(show.drops & nrow(data.drops) > 0) {
+            p = p + geom_vline(aes(xintercept=Time, alpha=Drops, color="Excluded"), data=data.drops) 
+            p = p + scale_alpha_identity() 
+        }
+        
+        data.ex = subset(data, !is.na(Excluded) & !grepl("Rejected", Excluded))
+        if(nrow(data.ex)) p = p + geom_point(aes(Time, OD), data=data.ex, size=1)        
+    } else {
+        p = ggplot(data) +
+            geom_line(aes(Time, OD, color=Well), alpha=0.3)
+    }
+    
+    tl = ""
+    if(!is.na(main))
+        tl = paste0(": ", main)
+    
+    p = p + theme_bw() + 
+        ggtitle(paste0(data$File[1], tl)) +
+        scale_x_continuous(breaks=seq(0, max(data$Time, na.rm=T), 8), labels=seq(0, max(data$Time, na.rm=T), 8)) +
+        theme_classic()
+    
+    
+    if(!merge)
+    {
+        #p = p + theme(legend.position="none")
+    }
+    
+    p
+}
+
+gen5.parse = function(path, remove.empty=T)
+{
+    library(reshape2)
+    
+    wb = XLConnect::loadWorkbook(path)
+    df = XLConnect::readWorksheet(wb, sheet=1, header=F)
+    
+    section.starts = which((is.na(df[,2]) | df[,2] == "") & c(F, zoo::rollapply(df[,1], 3, function(z) all((!is.na(z) & nchar(z) > 0) == c(F,T,F))), F))
+    
+    sections = as.data.frame(zoo::rollapply(section.starts, 2, function(z) data.frame(name=df[z[1], 1], start=z[1]+1, end=z[2]-1)), stringsAsFactors=F)
+    sections$start = as.numeric(sections$start)
+    sections$end = as.numeric(sections$end)
+    sections = rbind(data.frame(name="Metadata", start=1, end=sections$start[1]-2, stringsAsFactors=F), sections)
+    sections = rbind(sections, data.frame(name=df[tail(section.starts,1),1], start=tail(section.starts,1)+1, end=nrow(df), stringsAsFactors=F))
+    
+    special.sections = c(intersect(c("Metadata", "Layout", "Results"), sections$name), "Wells")
+     
+    wells = NULL
+    sections.res = list()
+    for(i in 1:nrow(sections))
+    {
+        s = df[sections$start[i]:sections$end[i],]
+        
+        space = apply(s, 1:2, function(z) !is.na(z) && nchar(z) > 0)
+        
+        space.rows = apply(space, 1, max) > 0
+        space.rows.min = which(space.rows>0)[1]
+        space.rows.max = tail(which(space.rows>0), 1)
+        
+        space.cols = apply(space, 2, max) > 0
+        space.cols.min = which(space.cols>0)[1]
+        space.cols.max = tail(which(space.cols>0), 1)
+        
+        s = s[space.rows.min:space.rows.max, space.cols.min:space.cols.max]
+        
+        s.res = NA        
+        if(is.na(s[1,1]) || s[1,1] == "") {
+            if(mean(!is.na(s[-1,1])) < 1/3) {
+                s.res = as.data.frame(s[-1,])
+                colnames(s.res) = gen5.prune_name(s[1,])
+                colnames(s.res)[1] = "Section"
+                rownames(s.res) = NULL
+                s.res$Section = gen5.repeat_label(s[-1,1])
+            } else {
+                s.res = as.data.frame(s[-1,-1])
+                rownames(s.res) = gen5.prune_name(s[-1,1])
+                colnames(s.res) = gen5.prune_name(s[1,-1])
+            }
+        } else {
+            s.res = as.data.frame(s[-1,])
+            colnames(s.res) = gen5.prune_name(s[1,])
+            rownames(s.res) = NULL
+        }
+        
+        s.res = apply(s.res, 1:2, function(z) gsub("^\\?+$", "", z))
+        s.res[s.res==""] = NA
+        
+        if(remove.empty)
+        {
+            s.res = s.res[rowMeans(!is.na(s.res)) >= 0.05,]
+            if(!is.matrix(s.res))
+                s.res = t(s.res)
+        }
+        
+        s.res = as.data.frame(s.res, stringsAsFactors=F)
+        
+        if(sections$name[i] == "Layout")
+        {
+            layout.cols = colnames(s.res)[!grepl("unnamed", colnames(s.res))]
+            layout.rows = rownames(s.res)[!grepl("unnamed", rownames(s.res))]
+            s.res2 = s.res[layout.rows, layout.cols]
+            s.res2$Row = rownames(s.res2)
+            wells = melt(s.res2, id.vars="Row", variable.name="Col", value.name="Annotation")
+            wells$Col = as.character(wells$Col) 
+            wells$Well = apply(wells[,c("Row", "Col")], 1, paste, collapse="")
+        }
+        
+        if(nrow(s.res) > 0)
+        {
+            if(!(sections$name[i] %in% special.sections))
+            {
+                if("Time" %in% colnames(s.res))
+                {
+                    s.res$Time = as.POSIXct(s.res$Time, format="%Y-%m-%d %H:%M:%S")
+                    s.res$Time = as.numeric(s.res$Time - min(s.res$Time, na.rm=T))
+                }
+                
+                if(paste0("T_", sections$name[i]) %in%  colnames(s.res))
+                {
+                    colnames(s.res)[colnames(s.res) == paste0("T_", sections$name[i])] = "Temperature"
+                }
+                
+                for(w in setdiff(colnames(s.res), "Time"))
+                {
+                    s.res[[w]] = as.numeric(sub(",", ".", s.res[[w]]))
+                }
+            }
+            
+            sections.res[[sections$name[i]]] = s.res
+        }
+    }
+
+    sections.res$Wells = wells
+        
+    sections.res.long = data.frame()
+    for(s in setdiff(names(sections.res), special.sections))
+    {
+        s.cols = colnames(sections.res[[s]])
+        id.vars = s.cols[!grepl("[A-Z][0-9][0-9]?", s.cols)]
+        section.wells = s.cols[grepl("[A-Z][0-9][0-9]?", s.cols)]
+        s.long = melt(sections.res[[s]], 
+          id.vars=id.vars, 
+          measure.vars=section.wells,
+          variable.name="Well",
+          value.name="OD")
+        s.long.dim = dim(s.long)
+        if(!is.null(sections.res$Wells)) { 
+            annotations = sections.res$Wells
+        } else {
+            w = as.character(unique(s.long$Well))
+            annotations = data.frame(Well=w, Row=gsub("\\d", "", w), Col=gsub("[A-Z]", "", w), Annotation=w, stringsAsFactors=F)
+        }
+        s.long = merge(s.long, annotations, by="Well")
+        stopifnot(s.long.dim + c(0,3) == dim(s.long))
+        s.long$Section = s
+        for(s1 in setdiff(id.vars, colnames(s.long)))
+            s.long[[s1]] = NA
+        s.long = s.long[,c("Section", "Well", "Row", "Col", "Annotation", id.vars, "OD")]
+        s.long$Well = as.character(s.long$Well)
+        s.long$File = path
+        
+        s.long = ddply(s.long, .(Annotation), function(z) {
+            z.wells = unique(z$Well[order(as.numeric(z$Col), z$Row)])
+            
+            if(length(z.wells) > 1) {
+                z$TechnicalReplicates = paste0(z.wells[1], "-", z.wells[length(z.wells)])
+            } else {
+                z$TechnicalReplicates = z.wells
+            }
+            
+            z
+        })
+        
+        if(nrow(sections.res.long)) {
+          for(col in setdiff(colnames(sections.res.long), colnames(s.long))) {
+            s.long[[col]] = NA
+          }
+          s.long = s.long[,colnames(sections.res.long)]
+        }
+        
+        
+        sections.res.long = rbind(sections.res.long, s.long)
+    }
+
+    
+    sections.res.long$Excluded = NA
+    
+    list(raw=sections.res, long=sections.res.long)
+}
+
+
+
+gen5.group_timepoints = function(z, step=60*60)
+{
+    if(T) {
+        points = ddply(z, .(File, Well), nrow)$V1
+        points = pmin(max(points - 1), median(points, na.rm=T) + 1)
+        times = z$Time
+        times[times > min(times, na.rm=T)] = cut(times[times > min(times, na.rm=T)], points, labels=F, ordered_result=T) + 1
+        z$Time = with(aggregate(z$Time, by=list(times), min, na.rm=T), x[match(times, Group.1)])
+    }
+    
+    z
+}
+
+gen5.plotreplicates = function(z, error=F)
+{
+    files.count = length(unique(z$File))
+    wells.count = length(unique(z$Well))
+    
+    
+    z2 = z
+    z2$OD[!is.na(z2$Excluded)] = NA
+    if(files.count > 1)
+    {
+        z2 = gen5.group_timepoints(z2)
+    }
+    
+    
+    z.square = dcast(z2, Time ~ File + Well, value.var="OD", fun.aggregate=function(z) mean(z, na.rm=T))
+    z.summary = ddply(z2, .(Time), summarize, SD=sd(OD, na.rm=T), OD=mean(OD, na.rm=T))
+    z$ExcludedShort = ifelse(is.na(z$Excluded), "", z$Excluded)
+    
+    group = "Well"
+    if(files.count > 1) group = "File"
+    if(wells.count > 1) group = "Well"
+    if(files.count > 1 & wells.count > 1) group = "paste(File, Well)"
+    
+    z2 = z
+    z2$OD[!is.na(z2$Excluded) & !grepl("Rejected", z2$Excluded)] = NA
+    
+    p1 = ggplot(z, aes(Time, OD)) + 
+        geom_line(aes_string(color=group), alpha=0.3) +
+        geom_point(aes_string(color=group), size=1, data=z) +
+        geom_smooth(method="loess", alpha=0.2, degree=2, data=z2) +
+        geom_text(aes(label=ExcludedShort), hjust=0) + 
+        ggtitle(gen5.wells_name(z)[1]) + 
+        scale_x_continuous(breaks=seq(0, max(z$Time, na.rm=T), 7200), labels=seq(0, max(z$Time, na.rm=T)/3600, 2))
+    
+    if(error && group == "Well" && length(unique(z$Well)) >= 2) {    
+        z.combinations = data.frame(x=combn(colnames(z.square)[-1],2)[1,], y=combn(colnames(z.square)[-1],2)[2,])
+        z.combinations.raw = apply(z.combinations, 1, function(z1) { z1.res = (z.square[,z1["x"]]-z.square[,z1["y"]])^2 })
+        z.combinations.num = rowSums(!is.na(z.combinations.raw))
+        z.combinations.num[z.combinations.num==0] = NA
+        z.combinations = rowSums(z.combinations.raw, na.rm=T)/z.combinations.num
+        
+        z.error = data.frame(Time=z.square$Time, Error=z.combinations)
+        p2 = ggplot(z.error, aes(Time, Error)) + 
+            geom_line() + 
+            geom_point() + 
+            geom_hline(aes(color="Median"), yintersect=median(z.combinations, na.rm=T), linetype="dashed")
+        
+        p = grid.arrange(
+            arrangeGrob(
+                arrangeGrob(p1 + theme(legend.position="none", axis.title.x=element_blank()) , p2)),
+            ggplot.legend(p1),
+            nrow=1,
+            widths=c(4,1))
+        
+    } else {
+        p = p1
+    }
+    
+    return(p)
+}
+
+gen5.annotate_technical_errors = function(res)
+{
+    res = ddply(res, .(File, Section, Species, ConditionSpecies), function(z) {
+        #if(paste(z$File, z$ConditionSpecies, z$Species) == "GMM_blue_P_capillosus V. parvula P. capillosus")
+        #z = res[which(res$Media=="ZP" & res$Species == "B. animalis subsp. lactis BL-04" & res$ConditionSpecies == "E. coli ED1a"),]
+        #z = res[which(res$File == "GMM_blue_E_rectale" & res$Well %in% c("C2", "C3")),]
+        #z = res[which(res$File == "GMM_blue_B_infantis" & res$Well %in% c("D8", "D9")),]
+        #z = res[which(res$File == "GMM_blue_B_fragilis_enterotoxigenic" & res$Well %in% c("C8", "C9")),]
+        
+        
+        if(length(unique(z$Well)) >= 2) {
+            z2 = z
+            z2$OD[!is.na(z2$Excluded)] = NA
+            z.square = dcast(z2, Time ~ Well, value.var="OD")
+            
+            wells = unique(z$Well)
+            z.combinations = data.frame(x=combn(wells,2)[1,], y=combn(wells,2)[2,])
+            z.combinations.raw = apply(z.combinations, 1, function(z1) { z1.res = (z.square[,z1["x"]]-z.square[,z1["y"]])^2 })
+            z.combinations.num = rowSums(!is.na(z.combinations.raw))
+            z.combinations.num[z.combinations.num==0] = NA
+            
+            z.combinations = rowSums(z.combinations.raw, na.rm=T)/z.combinations.num
+            z.combinations = z.combinations - median(z.combinations, na.rm=T)
+            
+            if(F) {
+                gen5.plotreplicates(z)
+            }
+            
+            if(max(abs(z.combinations), na.rm=T) >= .05^2)
+            {
+                outlier.test = dixon.test(abs(z.combinations))
+                if(outlier.test$p.value < 0.05)
+                {
+                    outlier.time = z.square$Time[which.max(abs(z.combinations))]
+                    outlier.od = max(abs(z$OD[z$Time==outlier.time]), na.rm=T)
+                    
+                    z.excluded = which(z$Time == outlier.time & z$OD == outlier.od)       
+                    z$Excluded[z.excluded] = gen5.add_class(z$Excluded[z.excluded], "Technical")
+                }
+            }
+        } 
+        
+        z
+    }) 
+    
+    res
+}
+
+gen5.curate_outliers = function(res, type="Manual", start=1, excluded=T, forceSingle=F)
+{
+    res$Time = res$Time / 3600
+    
+    res.names = paste(res$File, res$File, res$Section, res$Species, res$ConditionSpecies, res$Well, res$Time)
+    res.groups = with(res, paste0(gsub("^([^_]+_[^_]+_[^.]+).*", "\\1", File), " [", TechnicalReplicates, "]"))
+    
+    palette = RColorBrewer::brewer.pal(8, "Dark2")
+    outlier_groups = unique(res.groups[!excluded | !is.na(res$Excluded)])
+        
+    b2 = F
+    print(paste0("You will have to check ", length(outlier_groups), " outliers"))
+    if(start <= length(outlier_groups))
+    for(g in start:length(outlier_groups))
+    {
+        print(paste0(g, "/", length(outlier_groups)))
+        g = outlier_groups[g]
+        while(T)
+        {
+            z = res[which(res.groups == g),]
+            z = z[order(z$Time), ]
+            z$Time = z$Time
+            
+            wells = unique(as.character(z$Well))
+            plot.main = paste0(g, ifelse(is.na(z$Species[1]), " control", ""))
+            
+            plot(OD ~ Time, data=z, pch=ifelse(is.na(z$Excluded) | grepl("Rejected", z$Excluded), 1, 19), col=ifelse(grepl(paste0("Rejected|", type), z$Excluded), "red", "black"), main=plot.main)
+            z.mean.f = is.na(z$Excluded) | grepl("Rejected", z$Excluded)
+            if(sum(z.mean.f) > 1)
+            {
+                z.mean = approx(z$Time[z.mean.f], z$OD[z.mean.f], n=100)
+                lines(z.mean, col="#CCCCCC99", lwd=10)
+            }
+            text(z$Time, z$OD, labels=ifelse(is.na(z$Excluded), "", gsub("[a-z]", "", z$Excluded)), adj=c(-0.2,0.5))
+            for(w in 1:length(wells)) {
+                lines(OD ~ Time, data=subset(z, Well==wells[w]), col=palette[w], type="c")
+            }
+            
+            o = unique(identify(z$Time, z$OD, n=ifelse(forceSingle, 1, nrow(z))))
+            if(length(o) > 0) {
+                z.id = paste(z$File[o], z$File[o], z$Section[o], z$Species[o], z$ConditionSpecies[o], z$Well[o], z$Time[o])
+                res.oid = match(z.id, res.names)
+                                                
+                for(i in res.oid) {
+                    if(is.na(res$Excluded[i]) || grepl("Rejected", res$Excluded[i])) {
+                        res$Excluded[i] = gen5.remove_class(res$Excluded[i], "Rejected")
+                        if(is.na(res$Excluded[i]))
+                            res$Excluded[i] = gen5.add_class(res$Excluded[i], type)
+                        
+                    } else {
+                        was.manual = grepl(type, res$Excluded[i])
+                        res$Excluded[i] = gen5.remove_class(res$Excluded[i], type)
+                        if(!was.manual)
+                            res$Excluded[i] = gen5.add_class(res$Excluded[i], "Rejected")
+                    }
+                }
+            }
+            
+            z = res[which(res.groups == g), ]
+            z = z[order(z$Time), ]
+            z$Time = z$Time
+            
+            plot.main = paste0(g, ifelse(is.na(z$Species[1]), " control", ""))
+            plot(OD ~ Time, data=z, pch=ifelse(is.na(z$Excluded) | grepl("Rejected", z$Excluded), 1, 19), col=ifelse(grepl(paste0("Rejected|", type), z$Excluded), "red", "black"), main=plot.main)
+            z.mean.f = is.na(z$Excluded) | grepl("Rejected", z$Excluded)
+            if(sum(z.mean.f) > 1)
+            {
+                z.mean = approx(z$Time[z.mean.f], z$OD[z.mean.f], n=100)
+                lines(z.mean, col="#CCCCCC99", lwd=10)
+            }
+            text(z$Time, z$OD, labels=ifelse(is.na(z$Excluded), "", gsub("[a-z]", "", z$Excluded)), adj=c(-0.2,0.5))
+            for(w in 1:length(wells)) {
+                lines(OD ~ Time, data=subset(z, Well==wells[w]), col=palette[w], type="c")
+            }
+            
+            if(!forceSingle) {
+                line = readline(prompt="Are you satisfied (default:y, n, break)? ")
+            } else {
+                line = "y"
+            }
+            if(line == "break") {
+                b2 = T
+                break
+            }
+            if(line == "" || line == "y") {
+                break
+            } 
+        }
+        
+        if(b2) break
+    }
+    
+    res$Time = res$Time * 3600
+    
+    res
+}
+
+gen5.condition_models = function(res)
+{
+    res.media = subset(res, !is.na(ConditionSpecies) & is.na(Species))
+    res.models = list()
+    for(cs in unique(paste(res.media$Media, res.media$ConditionSpecies))) {
+        z = subset(res.media, paste(Media, ConditionSpecies) == cs)
+        z$OD[!is.na(z$Excluded)] = NA
+        #print(gen5.plotreplicates(z))
+        res.models[[cs]] = loess(OD ~ Time, z)
+    }
+    
+    res.media_models = subset(res, is.na(ConditionSpecies), is.na(Species))
+    for(cs in setdiff(unique(res$Media), names(res.models)))
+    {
+        z = subset(res.media, Media==cs)
+        z$OD[!is.na(z$Excluded)] = NA
+        #print(gen5.plotreplicates(z))
+        res.models[[cs]] = lm(OD ~ poly(Time, 3), z)
+    }
+    
+    res.models
+}
+
+gen5.od_diff = function(od, time) 
+{
+    od.diff = round(c(0, diff(od)/diff(time)),7)
+    od.diff.min = length(od.diff)*0.01
+    od.diff.out = sapply(od.diff, function(z2) sum(od.diff==z2, na.rm=T) <= od.diff.min)
+    
+    if(sum(od.diff.out, na.rm=T))
+    {
+        od.diff2 = od.diff[!od.diff.out]
+        od.diff2[od.diff.out] = NA
+        od.diff[od.diff.out] = sapply(od.diff[od.diff.out], function(z2) {
+            if(is.na(z2)) return(NA)
+            unname(od.diff2[which.min(abs(od.diff2-z2))])
+        })
+    }
+    
+    od.diff
+}
+
+
+gen5.longest_growth = function(od, time)
+{
+    df = aggregate(od, by=list(Time=time), FUN=function(z) mean(z, na.rm=T))
+    df = df[order(df$Time),]
+    
+    od.diff = gen5.od_diff(df$x, df$Time)
+    
+    od.wmax = which.max(od.diff)
+    od.phase = c(F, od.diff > max(od.diff, na.rm=T)/2)
+    od.phase[is.na(od.phase)] = F
+    
+    i.sections = data.frame()
+    i.start = NA
+    i.count = 0
+    for(i in diff(od.phase)) {
+        i.count = i.count + 1
+        if(i == 1 & is.na(i.start)) i.start = i.count
+        if(i == -1 & !is.na(i.start)) {
+            i.max = i.start <= od.wmax && i.count >= od.wmax
+            i.sections = rbind(i.sections, data.frame(begin=i.start, end=i.count))
+            i.start = NA
+        }
+    }
+    
+    if(!is.na(i.start)) {
+        i.count = nrow(df)
+        i.max = i.start <= od.wmax && i.count >= od.wmax
+        i.sections = rbind(i.sections, data.frame(begin=i.start, end=i.count))
+    }
+    
+    i.sections$length = i.sections$end - i.sections$begin
+    i.sections$max = i.sections$begin <= od.wmax & i.sections$end >= od.wmax
+    i.sections$diff = od.diff[i.sections$begin]
+    i.sections$begin = i.sections$begin - 1
+    i.sections$end = i.sections$end - 1
+    
+    r = rep(NA, length(df$Time))
+    if(nrow(i.sections) & sum(i.sections$max)) {
+        if(with(i.sections, end[max]-begin[max]) > 2) {
+            #exp.section = with(i.sections[which.max(i.sections$length),], begin:end)
+            exp.section = with(i.sections, begin[max]:end[max])
+            r[exp.section] = "exponential"
+        }
+    }
+    
+    if(any(!is.na(r)))
+    {
+        r[1:nrow(df) < min(which(r == "exponential"))] = "lag"
+        r[1:nrow(df) > max(which(r == "exponential"))] = "stable"        
+    } else {
+        r = rep("lag", nrow(df))
+    }
+    
+    r = r[match(time, df$Time)]
+    factor(r, c("lag", "exponential", "stable"))
+}
+
+gen5.wells_name = function(d)
+{
+    str = ""
+    if(!is.null(d$Species) & !is.null(d$ConditionSpecies))
+    {
+        str = rep("", nrow(d))
+        str.a = is.na(d$Species) & !is.na(d$ConditionSpecies)
+        str[str.a] = paste0(d$ConditionSpecies, " SM (", d$Media ,")")[str.a]
+        str.b = !is.na(d$Species) & is.na(d$ConditionSpecies)
+        str[str.b] = paste0(d$Species, " on ", d$Media)[str.b]
+        str.c = !is.na(d$Species) & !is.na(d$ConditionSpecies)
+        str[str.c] = paste0(d$Species, " on ", d$ConditionSpecies, " SM (", d$Media ,")")[str.c]
+        str.d = is.na(d$Species) & is.na(d$ConditionSpecies)
+        str[str.d] = paste0(d$Media, " M")[str.d]
+        str = paste0(d$File, ": ", str)
+    }
+    
+    str
+}
+
+.gompertz.deriv = function(t, la, mu, A) 
+{
+    .expr3 <- mu * exp(1)/A
+    .expr7 <- exp(.expr3 * (la - t) + 1)
+    .expr9 <- exp(-.expr7)
+    .value <- A * .expr9
+    .grad <- array(0, c(length(.value), 1L), list(NULL, c("t")))
+    .grad[, "t"] <- A * (.expr9 * (.expr7 * .expr3))
+    .grad[,1]
+}
+
+.gompertz.hessian = function(t, la, mu, A) 
+{
+    .expr3 <- mu * exp(1)/A
+    .expr7 <- exp(.expr3 * (la - t) + 1)
+    .expr9 <- exp(-.expr7)
+    .expr11 <- .expr7 * .expr3
+    .expr12 <- .expr9 * .expr11
+    .value <- A * .expr9
+    .grad <- array(0, c(length(.value), 1L), list(NULL, c("t")))
+    .hessian <- array(0, c(length(.value), 1L, 1L), list(NULL, c("t"), c("t")))
+    .hessian[, "t", "t"] <- A * (.expr12 * .expr11 - .expr9 * 
+                                     (.expr11 * .expr3))
+    .hessian[,1,1]
+}
+
+.gompertz = function(t, la, mu, A) A*exp(-exp( ((mu*exp(1))/A) * (la - t) + 1 ))
+.gompertz2 = function(t, const) .gompertz(t, const[1], const[2], const[3]) 
+.logistic = function(t, la, mu, A) A / (1 + exp( ((4*mu)/A)*(la-t) + 2  ))
+.logistic2 = function(t, const) .logistic(t, const[1], const[2], const[3]) 
+
+gen5.fit2 = function(z, plot=T, debug=F, t=NA, timeout1=1, timeout2=100) {
+    z2 = z
+    z2$OD[!(is.na(z2$Excluded) | (grepl("Rejected", z2$Excluded) & !grepl("TechnicalError", z2$Excluded)))] = NA
+
+    z_sum = ddply(z2, .(Time), summarize, Time_h=Time[1]/3600, OD=mean(OD, na.rm=T))
+    z_sum = z_sum[!is.na(z_sum$OD),]
+    #z_sum.f = c(diff(z_sum$Time_h) >= 0.5, T)
+    z_sum.f = T
+    z_sum = z_sum[z_sum.f,]
+    rownames(z_sum) = NULL
+    
+    z.time.unique = z_sum$Time
+    value = data.frame(n=NA)
+    value[,c("converged", "sigma", "lag", "mu", "A", "A_aim")] = NA
+    value[,c("lag.se", "mu.se", "A.se")] = NA
+    value[,c("lag.pval", "mu.pval", "A.pval")] = NA
+    
+    if(nrow(z_sum) < 3) {
+        if(plot) .gen5.fit2.plot(z2)
+        return(value)        
+    }
+    
+    mu.wmax = which.max(diff(z_sum$OD)/diff(z_sum$Time_h))
+    od.wmax = which.max(z_sum$OD)
+    od.half_wmax = min(c(mu.wmax))
+    
+    z.fits = data.frame(i=1:od.half_wmax, time=z.time.unique[1:od.half_wmax], time_h=z.time.unique[1:od.half_wmax]/3600)
+    z.fits = cbind(z.fits, value)
+    z.fits$n = pmin(nrow(z_sum), od.wmax+1) - z.fits$i + 1
+    z.fits$done = F
+    #z.fits = subset(z.fits, n > 2)
+    
+    xlim = c(0, max(z$Time, na.rm=T))/3600
+    
+    tryCatch({
+        R.utils::evalWithTimeout({
+        for(i in z.fits$i)
+        {
+            iv.which = which(z.fits$i == i)
+            iv = z.fits[iv.which,]
+            z_sum.i = z_sum
+            z_sum.i$OD_log = log(z_sum.i$OD/z_sum.i$OD[iv$time==z_sum.i$Time])
+            
+            const_in = c(
+                lag = z_sum.i$Time_h[mu.wmax],
+                mu = max(diff(z_sum.i$OD_log)/diff(z_sum.i$Time_h), na.rm=T),
+                A = z_sum.i$OD_log[od.wmax])
+    
+            
+            for(ci in 1:10) {
+                if(debug) writeLines(paste0(ci, ": Fiting model (offset ", round(iv$time_h,2) ,")"))
+                const_in.rand = const_in
+                const_in.rand["lag"] = runif(1, const_in["lag"]/2, const_in["lag"])
+                
+                z_sum.i.fit = tryCatch({
+                    R.utils::evalWithTimeout({
+                        nls.res = nls(OD_log ~ .gompertz(Time_h, lag, mu, A), data=z_sum.i[1:(iv$i+iv$n-1),],
+                          start=const_in.rand, lower=list(lag=0, mu=const_in["mu"]/4, A=const_in["A"]/2), upper=const_in,
+                          algorithm="port", control=list(warnOnly=T), trace=debug)
+                        
+                        nls.res
+                    }, timeout=timeout1)
+                }, error=function(ex) NULL)
+                if(!is.null(z_sum.i.fit)) break 
+            }
+            
+            z.fits$done = T
+            
+            if(is.null(z_sum.i.fit)) {
+                next
+            }
+    
+            r = z_sum.i.fit$m$Rmat()
+            fit.sum.valid = all(diag(r != 0) & nrow(r) >= ncol(r))
+            if(fit.sum.valid) {
+                fit.sum = summary(z_sum.i.fit)
+                z.fits[iv.which, c("lag.se", "mu.se", "A.se")] = fit.sum$coefficients[c("lag", "mu", "A"), "Std. Error"]
+                z.fits[iv.which, c("lag.pval", "mu.pval", "A.pval")] = fit.sum$coefficients[c("lag", "mu", "A"), "Pr(>|t|)"]
+                z.fits$sigma[iv.which] = fit.sum$sigma
+            } else {
+                z.fits[iv.which, c("lag.se", "mu.se", "A.se")] = rep(NA, 3)
+                z.fits[iv.which, c("lag.pval", "mu.pval", "A.pval")] = rep(NA, 3)
+                z.fits$sigma[iv.which] = NA
+            }
+                
+            
+            z.fits[iv.which, c("lag", "mu", "A")] = coef(z_sum.i.fit)
+            z.fits$n[iv.which] = od.wmax
+            z.fits$converged[iv.which] = z_sum.i.fit$convInfo$isConv  
+        }
+        
+        z.fits <<- z.fits
+        z.fits
+    }, timeout=timeout2)}, error=function(ex) NULL)
+    
+    iv = z.fits[ifelse(nrow(z.fits) == 1, 1, which.min(z.fits$sigma)),]
+    if(plot) {
+        .gen5.fit2.plot(z2, scale=z_sum$OD[iv$i], params=unlist(iv))
+        abline(v=t/3600+iv$lag, col="#FF440055")
+    }
+    
+    iv$A = exp(iv$A) * z_sum$OD[iv$i] - z_sum$OD[iv$i]
+    iv$A_aim = approx(z_sum[,c("Time", "OD")], xout=t)$y
+
+    iv[,c("lag", "lag.se", "lag.pval", "mu", "mu.se", "mu.pval", "A", "A_aim", "A.se", "A.pval", "sigma")]
+}
+
+.gen5.fit2.plot = function(z, scale=NULL, params=NULL)
+{
+    z$Time_h = z$Time/3600
+    
+    z_sum = ddply(z, .(Time), summarize, Time_h=Time[1]/3600, OD=mean(OD, na.rm=T))
+    z_sum = z_sum[!is.na(z_sum$OD),]
+    #z_sum.f = c(diff(z_sum$Time_h) >= 0.5, T)
+    #z_sum = z_sum[z_sum.f,]
+    rownames(z_sum) = NULL
+    
+    if(!is.null(scale)) {
+        z$OD = log(z$OD/scale)
+        z_sum$OD = log(z_sum$OD/scale)
+    }
+    
+    
+    main.title = paste0(unique(z$File), ": ", ifelse(length(unique(z$Well)) > 1, z$TechnicalReplicates, z$Well))
+    if(sum(!is.na(z_sum$OD)) < 2) {
+        plot(1, col="white", main=main.title)
+        text(1, 1, labels="No data")
+        return(NULL)
+    }
+    
+    z.approx = data.frame(approx(z_sum$Time_h, z_sum$OD, xout=seq(1, max(z_sum$Time_h), length.out=100)))
+    colnames(z.approx) = c("Time_h", "OD")
+    
+    par(xaxs='i',yaxs='i')
+    y.buffer = max(z$OD, na.rm=T) - min(z$OD, na.rm=T)
+    y.span = c(min(z$OD, na.rm=T) - y.buffer*0.2, max(z$OD, na.rm=T) + y.buffer*0.2)
+    palette = RColorBrewer::brewer.pal(8, "Dark2")
+    
+    plot(OD ~ Time_h, z, xaxt="n", ylim=y.span, main=main.title)
+    lines(z.approx, col="#AAAAAA66", lwd=8)
+    wells = unique(z$Well)
+    for(w in 1:length(wells)) {
+        z.well = subset(z, Well==wells[w])
+        z.well = z.well[order(z.well$Time),]
+        lines(OD ~ Time_h, data=z.well, col=palette[w], type="c")
+    }
+        
+    ticks = seq(0, max(z$Time_h, na.rm=T), 2)
+    axis(1, ticks, ticks)
+    
+    if(!is.null(params))
+    {
+        z_sum.approx = data.frame(Time_h=seq(0, max(z_sum$Time_h, na.rm=T), length.out=500))
+        lines(z_sum.approx$Time_h, .gompertz2(z_sum.approx$Time_h, params[c("lag", "mu", "A")]), lty=8, col="#0000FFCC")
+        z.a = -sin(params["mu"])*params["lag"]
+        z.b = params["mu"]
+        if(!is.na(z.a) & !is.na(z.b)) abline(a=z.a, b=z.b, lty=2, col="#663300")
+        abline(h=0, lty=2, col="#663300")
+        abline(h=params["A"], lty=2, col="#663300")
+        
+        z_sum.approx$deriv = .gompertz.deriv(z_sum.approx$Time_h, params["lag"], params["mu"], params["A"])
+        z_sum.approx$hessian = .gompertz.hessian(z_sum.approx$Time_h, params["lag"], params["mu"], params["A"])
+        extr.max1 = z_sum.approx$Time_h[which.max(z_sum.approx$deriv)]
+        extr.min2 = z_sum.approx$Time_h[which.min(z_sum.approx$hessian)]
+        extr.max2 = z_sum.approx$Time_h[which.max(z_sum.approx$hessian)]
+        abline(v=extr.max2, col="#CC333366", lty=15)
+        abline(v=extr.max1, col="#33CC3366", lty=15)
+        abline(v=extr.min2, col="#3333CC66", lty=15)
+    }
+}
+
+
+gen5.fit = function(z, z.model=NULL, z.base=NULL, plot=F, title=NULL) {
+    z.od = z$OD
+    z.time = z$Time
+    z$OD[!(is.na(z$Excluded) | grepl("Rejected", z$Excluded))] = NA
+    if(all(is.na(z$OD)))
+    {
+        return(data.frame(base=NA, base.blank=NA, lag=NA, mu=NA, mu.blank=NA, 
+                          auc=NA, max=NA, max.blank=NA, mu.finish=NA, max.time=NA, max.time.abs=NA))
+    }
+    
+    
+    z.sum = ddply(z, .(Time), summarize, OD=mean(OD, na.rm=T))
+    z.sum = z.sum[order(z.sum$Time),]
+    first.time = which(!is.na(z.sum$OD))[1]
+    
+    if(first.time > 1)
+    {
+        z.sum$OD[1:first.time] = z.sum$OD[first.time]
+    }
+    
+    z.time = na.omit(z$Time)
+    xl = seq(0, max(z.time), max(z.time)/300)
+    z.prediction = data.frame(Time=xl)
+    if(sum(!is.na(z$OD)) == 1) {
+        z.prediction$LoessOD = z$OD[!is.na(z$OD)]
+    } else {
+        z.prediction$LoessOD = approx(z$Time[!is.na(z$OD)], z$OD[!is.na(z$OD)], xout=xl)$y
+    }
+    
+    z.prune_od = data.frame(Time=sort(unique(z$Time)))
+    if(sum(!is.na(z$OD)) == 1) {
+        z.prune_od$OD = z$OD[!is.na(z$OD)]
+    } else {
+        z.prune_od$OD = approx(z$Time[!is.na(z$OD)], z$OD[!is.na(z$OD)], xout=z.prune_od$Time)$y
+    }
+    
+    xl.dense = which(rollapply(diff(z.prediction$LoessOD), 2, function(z2) sign(z2[1]) != sign(z2[2])))
+    xl.dense = xl.dense[xl.dense>2]
+    for(x in rev(xl.dense)) {
+        middle = seq(xl[x-2], xl[x+2], length.out=12)[-c(1, 12)]
+        left = xl[1:length(xl) < x-1]
+        right = xl[1:length(xl) > x+1]
+        xl = c(left, middle, right)
+    }
+    
+    z.prediction = data.frame(Time=xl)
+    if(sum(!is.na(z$OD)) == 1) {
+        z.prediction$LoessOD = z$OD[!is.na(z$OD)]
+    } else {
+        z.prediction$LoessOD=approx(z$Time[!is.na(z$OD)], z$OD[!is.na(z$OD)], xout=xl)$y
+    }
+    
+
+    z.prediction$phase = gen5.longest_growth(z.prediction$LoessOD, z.prediction$Time)
+    
+    if(F)
+    {
+        ggplot(z, aes(Time, OD)) + 
+            geom_line(aes_string(color="Well"), alpha=0.3) +
+            geom_point(aes_string(color="Well"), size=1, data=z) +
+            ggtitle(gen5.wells_name(z)[1]) + 
+            geom_line(aes(Time, LoessOD, color=phase), size=4, alpha=0.3, data=z.prediction)
+    }
+    
+    if(!is.null(z.base))
+    {
+        z.prediction$LagPhaseOD = z.base
+    } else {
+        if(any(z.prediction$phase == "lag"))
+        {  
+            if(sum(!is.na(z.prediction$LoessOD[z.prediction$phase == "lag"])) >= 5) {
+                z.lag.angle = with(z.prediction[z.prediction$phase == "lag", ], gen5.od_diff(LoessOD, Time))
+                z.lag.flat = rep(F, nrow(z.prediction))
+                z.lag.flat[which(abs(z.lag.angle) <= min(abs(z.lag.angle), na.rm=T)*2)] = T
+                if(sum(z.lag.flat, na.rm=T) > 1) {
+                    z.lagfit = lm(LoessOD ~ Time, z.prediction[z.lag.flat,])
+                    z.prediction$LagPhaseOD = predict(z.lagfit, data.frame(Time=xl))
+                } else {
+                    z.prediction$LagPhaseOD = z.prediction$LoessOD[z.lag.flat]
+                }
+            } else {
+                z.prediction$LagPhaseOD = z.prediction$LoessOD[which.max(!is.na(z.prediction$LoessOD))]
+            }
+        } else {
+            z.prediction$LagPhaseOD = mean(z.prediction$LoessOD[z.prediction$Time <= 3600], na.rm=T)
+        }
+    }
+    
+    if(!is.null(z.model)) {
+        z.prediction$Control = predict(z.model, data.frame(Time=xl))
+    } else {
+        z.prediction$Control = z.prediction$LagPhaseOD
+    }
+    
+    if(any(z.prediction$phase == "exponential"))
+    {
+        z.prediction.exp = subset(z.prediction, phase == "exponential")
+        z.exp.angle = with(z.prediction.exp, gen5.od_diff(LoessOD, Time))
+        z.exp.angle = which(abs(z.exp.angle) >= max(z.exp.angle, na.rm=T)*0.9)
+        if(length(z.exp.angle) == 1) {
+            z.exp.angle = sort(c(z.exp.angle, ifelse(z.exp.angle==nrow(z.prediction.exp), z.exp.angle-1, z.exp.angle+1)))
+        }
+            
+        z.expfit = lm(LoessOD ~ Time, z.prediction.exp[z.exp.angle,])
+        
+        z.prediction$Mu = z.expfit$coefficients["Time"]
+        if(!is.null(z.model)) {
+            z.prediction.exp$ModelOD = predict(z.model, z.prediction.exp)
+        } else {
+            z.prediction.exp$ModelOD = mean(z.prediction$LagPhaseOD, na.rm=T)
+        }
+        
+        z.expfit.m = lm(ModelOD ~ Time, z.prediction.exp[z.exp.angle,])
+        z.prediction$Mu.blank = z.expfit$coefficients["Time"] - z.expfit.m$coefficients["Time"]
+        
+        z.prediction$ExpPhaseOD = predict(z.expfit, z.prediction)
+        
+        z.lag_point = which.min(abs(z.prediction$LagPhaseOD - z.prediction$ExpPhaseOD))
+        if(!length(z.lag_point)) z.lag_point = 1
+        
+        z.prediction$LogPhaseStartTime = z.prediction$Time[z.lag_point]
+        z.prediction$LogPhaseStartOD = z.prediction$ExpPhaseOD[z.lag_point]
+        z.prediction$MaxODTime = z.prediction$Time[which.max(z.prediction$LoessOD)]
+        z.prediction$MaxOD = max(z.prediction$LoessOD)
+        
+        if(any(z.prediction$phase == "stable" & !is.na(z.prediction$LoessOD))) {
+            z.stable = z.prediction[z.prediction$phase == "stable", ]
+            z.prediction$StatPhaseOD = max(z.stable$LoessOD, na.rm=T)
+            z.prediction$StatPhaseTime = z.stable$Time[which.max(z.stable$LoessOD)]
+        } else { 
+            exp.end = max(which(z.prediction$phase == "exponential"), na.rm=T)
+            z.prediction$StatPhaseOD = max(z.prediction$ExpPhaseOD, na.rm=T)
+            z.prediction$StatPhaseTime = z.prediction$Time[exp.end]
+        }
+    } else {
+        z.prediction$LogPhaseStartTime = NA
+        z.prediction$LogPhaseStartOD = NA
+        z.prediction$MaxODTime = z.prediction$Time[which.max(z.prediction$LoessOD)]
+        z.prediction$MaxOD = max(z.prediction$LoessOD)
+        z.prediction$ExpPhaseOD = NA
+        z.prediction$StatPhaseOD = NA
+        z.prediction$StatPhaseTime = NA    
+        z.prediction$Mu = NA
+        z.prediction$Mu.blank = NA
+    }
+    
+    max.blank = NA
+    if(!is.na(z.prediction$StatPhaseTime[1]))
+    {
+        max.blank = z.prediction$StatPhaseOD[1] - 
+            ifelse(!is.null(z.model), 
+            predict(z.model, data.frame(Time=z.prediction$StatPhaseTime[1])),
+            mean(z.prediction$LagPhaseOD, na.rm=T))
+    }
+    
+    
+    if(is.na(z.prediction$LogPhaseStartOD[1])) {
+        z.prediction$BaseBlank = z.prediction$LagPhaseOD[1] - ifelse(!is.null(z.model), 
+             predict(z.model, data.frame(Time=0)), mean(z.prediction$LagPhaseOD, na.rm=T))    
+        z.prediction$Base = z.prediction$LagPhaseOD[1]
+    } else {
+        z.prediction$BaseBlank = z.prediction$LogPhaseStartOD[1] - ifelse(!is.null(z.model), 
+            predict(z.model, data.frame(Time=z.prediction$LogPhaseStartTime[1])), 
+            mean(z.prediction$LagPhaseOD, na.rm=T))
+            
+        z.prediction$Base = z.prediction$LogPhaseStartOD[1]
+    }
+    
+    
+    z.auc.fun = function(z.i, zz.sum) {
+        t = diff(zz.sum$Time[z.i]/3600) 
+        od.min = min(zz.sum$OD[z.i])
+        od.max = max(zz.sum$OD[z.i])
+        od.area = t*od.min + t*((od.max-od.min)/2)
+        
+        return(od.area)
+    }
+
+    z_base.sum = z.sum
+    if(!is.null(z.model)) { 
+        z_base.sum$OD = predict(z.model, z_base.sum)
+    } else {
+        z_base.sum$OD = mean(z.prediction$LagPhaseOD, na.rm=T)
+    }
+    
+    z.area = zoo::rollapply(1:nrow(z.sum), 2, z.auc.fun, zz.sum=z.sum)
+    z_base.area = zoo::rollapply(1:nrow(z_base.sum), 2, z.auc.fun, zz.sum=z_base.sum)
+    z.area.sum = sum(z.area - z_base.area, na.rm=T)
+    
+    z.fin.time = z.prediction$StatPhaseTime[1]
+    if(!is.na(z.fin.time))
+    {
+        last.phase = z.prediction$phase[!is.na(z.prediction$LoessOD)]
+        last.phase = last.phase[length(last.phase)]
+        z.fin = subset(z.prune_od, !is.na(OD))
+        z.fin = z.fin[order(z.fin$Time, decreasing=T),][1:2,]
+        z.fin$Time = z.fin$Time/3600
+        z.fin_fit = lm(OD ~ Time, z.fin)
+        max.time = z.fin.time/max(z.prediction$Time, na.rm=T)
+        max.time.abs = z.fin.time/3600
+        mu.finish = z.fin_fit$coefficients["Time"]
+    } else {
+        max.time = NA
+        max.time.abs = NA
+        mu.finish = NA
+    }
+    
+    ret = data.frame(base=z.prediction$Base[1], 
+            base.blank=z.prediction$BaseBlank[1],
+            lag=z.prediction$LogPhaseStartTime[1]/3600,
+            mu=ifelse(is.na(z.prediction$Mu[1]), NA, z.prediction$Mu[1]*3600),
+            mu.blank=ifelse(is.na(z.prediction$Mu.blank[1]), NA, z.prediction$Mu.blank[1]*3600),
+            auc=z.area.sum,
+            max=z.prediction$StatPhaseOD[1],
+            max.blank=max.blank,
+            max.time=max.time,
+            max.time.abs=max.time.abs,
+            mu.finish=mu.finish
+    )
+    
+    if(plot)
+    {
+        par(xaxs='i',yaxs='i')
+        y.buffer = max(z.prediction$LoessOD, na.rm=T) - min(z.prediction$LoessOD, na.rm=T)
+        y.span = c(min(c(z.prediction$LoessOD, z.od), na.rm=T) - y.buffer*0.2, max(c(z.prediction$LoessOD, z.od), na.rm=T) + y.buffer*0.2)
+        #y.span = ifelse(y.span < 0, 0, y.span)
+        plot(z.time, z.od, xaxt="n", ylim=y.span)
+        ticks = seq(0, max(z$Time, na.rm=T), 7200)
+        axis(1, ticks, ticks/3600)
+        lines(LoessOD ~ Time, z.prediction[z.prediction$phase == "lag",], col="#AA000033", lwd=8)
+        lines(LoessOD ~ Time, z.prediction[z.prediction$phase == "exponential",], col="#00AA0033", lwd=8)
+        lines(LoessOD ~ Time, z.prediction[z.prediction$phase == "stable",], col="#0000AA33", lwd=8)
+        lines(Control ~ Time, z.prediction, col='#22BB2233', lwd=2)
+        lines(LagPhaseOD ~ Time, z.prediction, col='#2222BB33', lwd=2)
+        
+        if(!is.null(title)) {
+            title(title)
+        } else {
+            title(main=gen5.wells_name(z[1,]))
+        }
+        
+        if(max(z.prediction$LoessOD, na.rm=T) < 0.3) {
+            rect(par("usr")[1], par("usr")[3], par("usr")[2], par("usr")[4], col="#FF000005")
+        }
+        
+        if(!is.na(z.prediction$LogPhaseStartTime[1]))
+        {
+            axis(1, z.prediction$LogPhaseStartTime[1], labels=round(z.prediction$LogPhaseStartTime[1]/3600))
+            abline(v=z.prediction$LogPhaseStartTime[1], lty=2, col="grey")
+            points(z.prediction$LogPhaseStartTime[1], z.prediction$LogPhaseStartOD[1], pch=4, lwd=2, col='#33CC3399')
+        }
+        
+        if(!is.na(z.prediction$LogPhaseStartOD[1]))
+            lines(LogPhaseStartOD ~ Time, z.prediction, col='#FF0000', lty=2, lwd=2)
+        
+        
+        if(!is.na(z.prediction$ExpPhaseOD[1]))
+            lines(ExpPhaseOD ~ Time, z.prediction, col='#FF0000', lty=2, lwd=2)
+        
+        if(!is.na(z.prediction$StatPhaseOD[1]))
+            lines(StatPhaseOD ~ Time, z.prediction, col='#FF0000', lty=2, lwd=2)
+        
+        if(!is.na(z.prediction$MaxODTime[1]))
+            points(z.prediction$MaxODTime[1], z.prediction$MaxOD[1], pch=4, lwd=2, col='#33CC3399')
+        
+        legend("topleft", legend=c("Lag phase", "Exp phase", "Stable phase", "Control fit", "Lag fit", "Parameters"), col=c("#AA000033", "#00AA0033", "#0000AA33", "#22BB2233", "#2222BB33", "#FF0000"), lwd=c(8, 8, 8, 2, 2, 2), lty=c(1,1,1,1,1,2), bg="#FFFFFF99")
+        
+        legend("bottomright", legend=c(
+            paste("base: ", round(ret$base, 2), " (", round(ret$base.blank, 2), ")"), 
+            paste0("lag: ", round(ret$lag)),
+            paste0("mu: ", round(ret$mu, 5), " (", round(ret$mu.blank, 5), ")"),
+            paste0("max: ", round(ret$max, 2), " (", round(ret$max.blank, 2), ")") 
+        ), col="white", bg="#FFFFFF00", box.lwd=0, box.col="#FFFFFF00", bty="n")
+        
+        par(xaxs='r',yaxs='r')
+    }
+    
+    
+    ret
+}
+
+gen5.annotate_droplet = function(res)
+{    
+    res = ddply(res, .(ConditionSpecies, Species, File), function(z) {
+        #z = subset(res, File == "GMM_blue_B_longum" & TechnicalReplicates == "F11−F12")
+        z.od = z$OD
+        z$OD[!is.na(z$Excluded)] = NA
+        z.sum = ddply(z, .(Time), summarize, OD=mean(OD, na.rm=T))
+        z.sum = z.sum[!is.na(z.sum$OD),]
+        z.sum = z.sum[order(z.sum$Time),]
+        
+        z.od_sort = sort(z.sum$OD, decreasing=T)       
+        is.drop = function(z2) {
+            (z2[2] - z2[1] >= 0.01) &
+            (z2[2] - z2[length(z2)] >= 0.01) &
+            abs(z2[1] - z2[length(z2)]) <= (z2[2] - z2[1])*0.8 & 
+            !all(match(z2[-1], z.od_sort) <= length(z2))
+        }
+        
+        z.sum$roll3 = c(F, rollapply(z.sum$OD, 3, FUN=is.drop), F)
+        z.sum$roll4 = c(F, rollapply(z.sum$OD, 4, FUN=is.drop), F,F) & !z.sum$roll3
+        z.sum$roll4[-1] = z.sum$roll4[-1] | !z.sum$roll4[-1] & z.sum$roll4[-length(z.sum$roll4)]
+        
+        peaks = which(z$Time %in% z.sum$Time[z.sum$roll4 | z.sum$roll3])
+        z$Excluded[peaks] = gen5.add_class(z$Excluded[peaks], "Droplet")
+        z$OD = z.od
+        
+        z
+    })
+    
+    res
+}
+
+
+
+gen5.annotate_condensation = function(res)
+{    
+    res = ddply(res, .(File, Section, Species, ConditionSpecies, Well), function(z) {
+        z.diff = diff(z$OD[order(z$Time)[1:3]])
+        if(all((z.diff > -0.01) == 0:1) & z.diff[1] < -0.05) {
+            z.excluded = which.min(z$Time)
+            z$Excluded[z.excluded] = gen5.add_class(z$Excluded[z.excluded], "Condensation")
+        }
+        
+        z
+    })
+    
+    res
+}

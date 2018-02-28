@@ -1,0 +1,22 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1515762334400.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "1341626662",
+    "id" : "8F618D4E",
+    "lastKnownWriteTime" : 1515762393,
+    "last_content_update" : 1515762391671,
+    "path" : "X:/Sergej/gut_bacteria/scripts/generate_paper_figures.R",
+    "project_path" : "generate_paper_figures.R",
+    "properties" : {
+        "source_window_id" : "",
+        "tempName" : "Untitled1"
+    },
+    "relative_order" : 7,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}

@@ -1,0 +1,70 @@
+#
+# Table S3. Annotated data
+#
+table.S3 = function() {
+  curves.a = read.table("../data/curves_annotation.tab", sep="\t", quote="", header=T, stringsAsFactors=F, na.strings="")
+  curves.a = subset(curves.a, !is.na(Species) & is.na(ConditionSpecies))
+  
+  curves.a = subset(curves.a, is.na(ConditionSpecies))
+  curves.a$TechnicalError = ifelse(grepl("Unrep|Undef", curves.a$Class) & curves.a$Passage!=2, 1, 0)
+  curves.a$Unfinished = ifelse(grepl("Unfinished", curves.a$Class), 1, 0)
+  curves.a$Unfinished[curves.a$TechnicalError==1] = NA
+  curves.a$Growth = ifelse(!grepl("NoGrowth", curves.a$Class), 1, 0)
+  curves.a$Growth[curves.a$TechnicalError==1] = NA
+  curves.a$MaxOD[curves.a$TechnicalError==1] = NA
+  curves.a$BlankOD[curves.a$TechnicalError==1] = NA
+  curves.a$Rate[curves.a$TechnicalError==1] = NA
+  curves.a$AUC8[curves.a$TechnicalError==1] = NA
+  curves.a$AUC12[curves.a$TechnicalError==1] = NA
+  curves.a$AUC18[curves.a$TechnicalError==1] = NA
+  curves.a$AUC24[curves.a$TechnicalError==1] = NA
+  curves.a = curves.a[,c("File", "TechnicalReplicates", "Media", "Passage", "Species", "TechnicalError", "Growth",  "Unfinished", "pH_48.mean", "BlankOD", "MaxOD", "Rate", "AUC8", "AUC12", "AUC18", "AUC24")]
+
+  write.table(curves.a, file="../report/tables/S3_Annotated_data.tab", sep="\t", quote=F, row.names=F, na="")
+}
+
+#
+# Table S4. Growth matrix
+#
+table.s4 = function()
+{
+  curves.a = read.table("../data/curves_annotation.tab", sep="\t", quote="", header=T, stringsAsFactors=F, na.strings="")
+  curves.a = subset(curves.a, !is.na(Species) & is.na(ConditionSpecies) & Passage==1 & !grepl("_", Media))
+  
+  growth_matrix.q1 = cuves.merge_annotations2(curves.a)
+  growth_matrix.q1$Media = gsub("^([0-9])", "M\\1", growth_matrix.q1$Media)
+  growth_matrix.q.raw = dcast(growth_matrix.q1, Species ~ Media, value.var="MaxOD")
+  growth_matrix.q.export = growth_matrix.q.raw[,c("Species", "GMM", "BHI++", "WCA", "mGAM", paste0("M", c(1:5,7:11, 13:14, "15 A", "15 B", "16")))]
+  write.table(growth_matrix.q.export, file="../report/tables/S4_growth_matrix.tab", sep="\t", quote=F, row.names=F, na="")
+}
+
+#
+# Table S5 Exact sample size
+#
+table.S5 = function() {
+  curves.a = read.table("../data/curves_annotation.tab", sep="\t", quote="", header=T, stringsAsFactors=F, na.strings="")
+  curves.a = subset(curves.a, !is.na(Species) & is.na(ConditionSpecies) & Passage==1 & !grepl("_", Media))
+
+  curves.a$TechnicalReplicatesCount = sapply(curves.a$TechnicalReplicates, function(x) {
+    x.chars = unlist(strsplit(gsub("([0-9])", "", x), "-"))
+    x.nums = unlist(strsplit(gsub("([A-Z])", "", x), "-"))
+    s.size1 = strtoi(charToRaw(x.chars[2]),16L) - strtoi(charToRaw(x.chars[1]),16L) + 1
+    s.size2 = as.numeric(x.nums[2]) - as.numeric(x.nums[1]) + 1
+    pmax(s.size1, s.size2)
+  })
+  curves.tech = ddply(curves.a, .(Species, Media), summarize, TechnicalReplicatesCount=sum(TechnicalReplicatesCount, na.rm=T))
+  
+  growth_matrix.q1 = cuves.merge_annotations2(curves.a)
+  growth_matrix.q1 = merge(growth_matrix.q1, curves.tech, by=c("Species", "Media"))
+  growth_matrix.q1$ReplicatesText = paste0(growth_matrix.q1$Replicates, " (", growth_matrix.q1$TechnicalReplicatesCount, ")")
+  growth_matrix.q.replicates = dcast(growth_matrix.q1, Species ~ Media, value.var="ReplicatesText")
+  growth_matrix.q.replicates = growth_matrix.q.replicates[,c("Species", "GMM", "BHI++", "WCA", "mGAM", as.character(1:5), as.character(7:11), "13", "14", "15 A", "15 B", "16")]
+  growth_matrix.q.replicates[is.na(growth_matrix.q.replicates)] = "0 (0)"
+  colnames(growth_matrix.q.replicates)[6:20] = paste0("M", colnames(growth_matrix.q.replicates)[6:20])
+  View(growth_matrix.q.replicates)
+  write.table(growth_matrix.q.replicates, file="../report/tables/S5_Exact_sample_size.tab", sep="\t", quote=F, row.names=F, na="")
+}
+
+table.S6_fig3a_pvalues = function() {
+  
+}

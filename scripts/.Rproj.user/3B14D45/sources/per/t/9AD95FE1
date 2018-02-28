@@ -1,0 +1,20 @@
+{
+    "collab_server" : "",
+    "contents" : "",
+    "created" : 1515717524910.000,
+    "dirty" : false,
+    "encoding" : "UTF-8",
+    "folds" : "",
+    "hash" : "2205217253",
+    "id" : "9AD95FE1",
+    "lastKnownWriteTime" : 1515718331,
+    "last_content_update" : 1515718330423,
+    "path" : "X:/Sergej/gut_bacteria/scripts/analysis.media_species_selection.R",
+    "project_path" : "analysis.media_species_selection.R",
+    "properties" : {
+    },
+    "relative_order" : 4,
+    "source_on_save" : false,
+    "source_window" : "",
+    "type" : "r_source"
+}
