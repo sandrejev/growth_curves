@@ -36,6 +36,9 @@ table.s4 = function()
 
   growth_matrix.q1 = cuves.merge_annotations2(curves.a)
   growth_matrix.q1$Media = gsub("^([0-9])", "M\\1", growth_matrix.q1$Media)
+  write.table(growth_matrix.q1, file="../report/tables/S4_growth_matrix_long.tab", sep="\t", quote=F, row.names=F, na="")
+  
+  
   growth_matrix.q1$MaxOD_with_sd = paste0(round(growth_matrix.q1$MaxOD,3), ifelse(growth_matrix.q1$MaxOD>0, paste0(" (", round(growth_matrix.q1$MaxOD_sd,3), ")"), ""))
   growth_matrix.q.raw = dcast(growth_matrix.q1, Species ~ Media, value.var="MaxOD_with_sd")
   growth_matrix.q.export = growth_matrix.q.raw[,c("Species", "GMM", "BHI++", "WCA", "mGAM", paste0("M", c(1:5,7:11, 13:14, "15 A", "15 B", "16")))]
